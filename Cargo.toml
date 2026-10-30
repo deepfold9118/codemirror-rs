@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/state", "crates/language", "crates/view", "crates/commands", "crates/demo", "crates/gpui"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = ""
+rust-version = "1.86"
+
+[workspace.dependencies]
+crop = { version = "0.4", features = ["utf16-metric"] }
+unicode-segmentation = "1.13"
+egui = { version = "0.35", default-features = false }
+eframe = "0.35"

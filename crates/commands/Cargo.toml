@@ -1,0 +1,15 @@
+[package]
+name = "codemirror-commands"
+version = "0.1.0"
+description = "A Rust port of @codemirror/commands: undo history, comment toggling and editing commands"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+codemirror-state = { path = "../state" }
+codemirror-language = { path = "../language" }
+codemirror-view = { path = "../view" }
+
+[dev-dependencies]
+eframe.workspace = true

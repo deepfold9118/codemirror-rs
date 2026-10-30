@@ -1,0 +1,11 @@
+[package]
+name = "codemirror-state"
+version = "0.1.0"
+description = "A Rust port of @codemirror/state: editor state, transactions, changes, facets and range sets"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+crop.workspace = true
+unicode-segmentation.workspace = true

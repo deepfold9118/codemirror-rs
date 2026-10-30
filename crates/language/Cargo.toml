@@ -1,0 +1,10 @@
+[package]
+name = "codemirror-language"
+version = "0.1.0"
+description = "A Rust port of @codemirror/language (parser-free subset so far: indentation and bracket matching)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+codemirror-state = { path = "../state" }

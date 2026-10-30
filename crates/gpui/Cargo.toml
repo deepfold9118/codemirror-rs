@@ -1,0 +1,15 @@
+[package]
+name = "codemirror-gpui"
+version = "0.1.0"
+description = "An editor view for the Rust CodeMirror port, drawn with GPUI (spike)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+codemirror-state = { path = "../state" }
+codemirror-language = { path = "../language" }
+gpui = "0.2.2"
+codemirror-commands = { path = "../commands" }
+codemirror-view = { path = "../view" }
