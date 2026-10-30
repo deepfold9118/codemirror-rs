@@ -13,6 +13,7 @@ use codemirror_state::{
 use crate::decoration::{Decoration, DecorationSet};
 use crate::editorview::EditorView;
 use crate::theme::Theme;
+use crate::viewstate::Viewport;
 use gpui::{Context, Window};
 
 /// Command functions are used in key bindings and other types of user
@@ -289,6 +290,9 @@ pub struct ViewUpdate {
     pub transactions: Vec<Transaction>,
     /// The changes made to the document by this update.
     pub changes: ChangeSet,
+    /// The view's viewport after the update (CodeMirror reads it from
+    /// `update.view.viewport`).
+    pub viewport: Viewport,
     pub(crate) changed_ranges: Vec<ChangedRange>,
     pub(crate) flags: u8,
 }
@@ -304,7 +308,7 @@ impl ViewUpdate {
             |from_a, to_a, from_b, to_b| changed_ranges.push(ChangedRange::new(from_a, to_a, from_b, to_b)),
             false,
         );
-        ViewUpdate { state, start_state, transactions, changes, changed_ranges, flags: 0 }
+        ViewUpdate { state, start_state, transactions, changes, viewport: Viewport::default(), changed_ranges, flags: 0 }
     }
 
     /// Whether the viewport changed in this update.

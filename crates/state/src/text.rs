@@ -155,6 +155,31 @@ impl Text {
         Text { rope: Rope::from(self.rope.byte_slice(from..to)) }
     }
 
+    /// Whether `pos` is at a char boundary (or at or past the end).
+    pub fn is_char_boundary(&self, pos: usize) -> bool {
+        pos >= self.len() || self.rope.is_char_boundary(pos)
+    }
+
+    /// The largest char boundary at or before `pos`, clipped to the
+    /// document.
+    pub fn floor_char_boundary(&self, pos: usize) -> usize {
+        let mut pos = pos.min(self.len());
+        while !self.is_char_boundary(pos) {
+            pos -= 1;
+        }
+        pos
+    }
+
+    /// The smallest char boundary at or after `pos`, clipped to the
+    /// document.
+    pub fn ceil_char_boundary(&self, pos: usize) -> usize {
+        let mut pos = pos.min(self.len());
+        while !self.is_char_boundary(pos) {
+            pos += 1;
+        }
+        pos
+    }
+
     /// Retrieve a part of the document as a string, joining lines with
     /// `line_sep`. Out-of-range boundaries are clipped to the document.
     pub fn slice_string(&self, from: usize, to: usize, line_sep: &str) -> String {

@@ -107,6 +107,12 @@ impl Element for EditorElement {
             for q in frame.selections.drain(..) {
                 window.paint_quad(q);
             }
+            // Mark decoration backgrounds. As in CodeMirror, where they are
+            // inline styles and the selection is a layer behind the text,
+            // they go over the selection.
+            for (origin, layout) in &frame.lines {
+                let _ = layout.wrapped.paint_background(*origin, line_height, TextAlign::Left, None, window, cx);
+            }
             for (origin, layout) in &frame.lines {
                 let _ = layout.wrapped.paint(*origin, line_height, TextAlign::Left, None, window, cx);
             }

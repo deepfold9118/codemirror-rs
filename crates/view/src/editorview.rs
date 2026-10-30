@@ -164,6 +164,7 @@ impl EditorView {
             self.update_plugins_config();
         }
         self.vs.update(&mut update);
+        update.viewport = self.vs.viewport;
         if selection_moved {
             self.restart_blink(cx);
         }
@@ -196,6 +197,7 @@ impl EditorView {
     pub(crate) fn notify_flags(&mut self, flags: u8, cx: &mut Context<Self>) {
         let mut update = ViewUpdate::new(self.state.clone(), self.state.clone(), Vec::new());
         update.flags = flags;
+        update.viewport = self.vs.viewport;
         for p in &mut self.plugins {
             p.value.update(&update);
         }

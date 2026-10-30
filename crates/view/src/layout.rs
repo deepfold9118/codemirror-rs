@@ -59,7 +59,8 @@ pub(crate) fn line_decorations(sets: &[DecorationSet], from: usize, to: usize) -
     if sets.iter().all(|s| s.is_empty()) {
         return out;
     }
-    RangeSet::spans(sets, from, to, &mut Collector { line_from: from, out: &mut out }, 0);
+    // -1: take ranges as well as points (0 would skip everything but points).
+    RangeSet::spans(sets, from, to, &mut Collector { line_from: from, out: &mut out }, -1);
     out
 }
 
@@ -323,3 +324,19 @@ impl LineLayout {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decoration::{MarkSpec, MarkStyle};
+
+    #[test]
+    fn marks_reach_line_decorations() {
+        let style = MarkStyle { background: Some(gpui::red()), ..Default::default() };
+        let mark = Decoration::mark(MarkSpec { style, ..Default::default() });
+        let set = Decoration::set(vec![mark.range(2, 7), mark.range(20, 25)], true);
+        let deco = line_decorations(&[set], 0, 10);
+        assert_eq!(deco.marks.iter().map(|m| (m.0, m.1)).collect::<Vec<_>>(), [(2, 7)]);
+    }
+}
+
