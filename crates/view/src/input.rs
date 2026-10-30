@@ -57,7 +57,9 @@ impl EditorView {
         self.dispatch(tr, cx);
     }
 
-    fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Paste the system clipboard, as Ctrl+V does. Returns false when the
+    /// editor is read-only or the clipboard has no text.
+    pub fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.editable() {
             return false;
         }
@@ -143,7 +145,9 @@ impl EditorView {
         (content.join(&state.line_break()), ranges, linewise)
     }
 
-    fn copy(&mut self, cut: bool, cx: &mut Context<Self>) -> bool {
+    /// Copy the selection (or the cursor lines) to the system clipboard, as
+    /// Ctrl+C does, and delete it when `cut` is true.
+    pub fn copy(&mut self, cut: bool, cx: &mut Context<Self>) -> bool {
         let (text, ranges, linewise) = self.copied_range();
         self.last_linewise_copy = linewise.then(|| text.clone());
         cx.write_to_clipboard(ClipboardItem::new_string(text));
