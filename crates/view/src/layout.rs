@@ -1,31 +1,21 @@
-//! Laying out a line of text with egui, and mapping between document
-//! positions and coordinates in that layout. This replaces CodeMirror's
-//! tile tree and DOM measurement (`tile.ts`, `docview.ts`, `buildtile.ts`).
+//! Laying out a document line with GPUI's text system, and mapping between
+//! document positions and coordinates in that layout. This replaces
+//! CodeMirror's tile tree and DOM measurement (`tile.ts`, `docview.ts`,
+//! `buildtile.ts`).
 
 use std::sync::Arc;
 
 use codemirror_state::{RangeSet, SpanIterator};
-use egui::text::{ByteIndex, LayoutJob, LayoutSection};
-use egui::{Galley, TextFormat};
+use gpui::{px, Font, Hsla, Pixels, SharedString, TextRun, UnderlineStyle, Window, WrappedLine};
 
 use crate::decoration::{Decoration, DecorationSet, Kind, MarkStyle};
-use crate::theme::Theme;
-
-/// A laid-out line.
-pub(crate) struct LineLayout {
-    pub galley: Arc<Galley>,
-    // Byte offset (within the line) of each char, plus the line length.
-    // Empty when the line is ASCII, where bytes and chars coincide.
-    byte_of_char: Vec<usize>,
-    len: usize,
-}
 
 /// The decorations that apply to one line.
 #[derive(Default)]
 pub(crate) struct LineDecorations {
     /// (from, to, styles), relative to the line start.
     pub marks: Vec<(usize, usize, Vec<MarkStyle>)>,
-    pub background: Option<egui::Color32>,
+    pub background: Option<Hsla>,
 }
 
 struct Collector<'a> {
@@ -73,184 +63,205 @@ pub(crate) fn line_decorations(sets: &[DecorationSet], from: usize, to: usize) -
     out
 }
 
-fn apply_style(format: &mut TextFormat, style: &MarkStyle) {
-    if let Some(c) = style.color {
-        format.color = c;
-    }
-    if let Some(c) = style.background {
-        format.background = c;
-    }
-    if let Some(s) = style.underline {
-        format.underline = s;
-    }
-    if let Some(s) = style.strikethrough {
-        format.strikethrough = s;
-    }
-    if style.italics {
-        format.italics = true;
-    }
+/// A laid-out line. Tabs are expanded to spaces up to the next tab stop,
+/// so positions are mapped between the document line and the displayed
+/// text.
+pub(crate) struct LineLayout {
+    pub wrapped: WrappedLine,
+    // For lines with tabs: the display offset of each document offset
+    // (length + 1 entries). Empty otherwise.
+    disp_of_doc: Vec<usize>,
+    doc_len: usize,
+    pub line_height: f32,
 }
 
-/// Lay out a line. Tabs are drawn as spaces that reach the next tab stop
-/// (a multiple of `tab_size` columns); everything else is egui's layout.
+pub(crate) struct Row {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// What a line is laid out with.
+pub(crate) struct LineStyle<'a> {
+    pub font: &'a Font,
+    pub font_size: Pixels,
+    pub color: Hsla,
+    pub line_height: f32,
+    pub wrap_width: Option<f32>,
+    pub tab_size: usize,
+}
+
+fn styled_run(base: &TextRun, styles: &[MarkStyle], len: usize) -> TextRun {
+    let mut run = TextRun { len, ..base.clone() };
+    for s in styles {
+        if let Some(c) = s.color {
+            run.color = c;
+        }
+        if s.background.is_some() {
+            run.background_color = s.background;
+        }
+        if s.underline.is_some() {
+            run.underline = s.underline;
+        }
+        if s.strikethrough.is_some() {
+            run.strikethrough = s.strikethrough;
+        }
+        if let Some(st) = s.font_style {
+            run.font.style = st;
+        }
+        if let Some(w) = s.font_weight {
+            run.font.weight = w;
+        }
+    }
+    run
+}
+
+/// Shape a line. `marked` is a composition range (relative to the line) to
+/// underline.
 pub(crate) fn layout_line(
-    fonts: &mut egui::epaint::text::FontsView<'_>,
-    theme: &Theme,
+    window: &mut Window,
     text: &str,
+    style: &LineStyle,
     deco: &LineDecorations,
-    wrap_width: Option<f32>,
-    tab_size: usize,
+    marked: Option<(usize, usize)>,
 ) -> LineLayout {
-    let base = TextFormat {
-        font_id: theme.font.clone(),
-        color: theme.text,
-        line_height: Some(theme.row_height()),
-        ..Default::default()
+    let (display, disp_of_doc) = if text.contains('\t') {
+        let mut display = String::with_capacity(text.len() + 8);
+        let mut map = Vec::with_capacity(text.len() + 1);
+        let mut col = 0;
+        let tab_size = style.tab_size.max(1);
+        for c in text.chars() {
+            for _ in 0..c.len_utf8() {
+                map.push(display.len());
+            }
+            if c == '\t' {
+                let width = tab_size - col % tab_size;
+                display.extend(std::iter::repeat_n(' ', width));
+                col += width;
+            } else {
+                display.push(c);
+                col += 1;
+            }
+        }
+        map.push(display.len());
+        (display, map)
+    } else {
+        (text.to_string(), Vec::new())
     };
-    // Style boundaries, from the marks.
-    let mut bounds: Vec<usize> = vec![0, text.len()];
+    let disp = |doc: usize| map_off(&disp_of_doc, doc.min(text.len()));
+
+    // Style boundaries (document offsets) from the marks and composition.
+    let mut bounds = vec![0, text.len()];
     for (from, to, _) in &deco.marks {
         bounds.push((*from).min(text.len()));
         bounds.push((*to).min(text.len()));
     }
+    if let Some((a, b)) = marked {
+        bounds.push(a.min(text.len()));
+        bounds.push(b.min(text.len()));
+    }
     bounds.sort_unstable();
     bounds.dedup();
-
-    let tab_size = tab_size.max(1);
-    let space_w = fonts.glyph_width(&theme.font, ' ');
-    let char_w = fonts.glyph_width(&theme.font, '0');
-    let mut job = LayoutJob { text: text.replace('\t', " "), ..Default::default() };
-    job.wrap.max_width = wrap_width.unwrap_or(f32::INFINITY);
-    let mut col = 0usize;
-    let mut pending_space = 0.0f32;
+    let base = TextRun {
+        len: 0,
+        font: style.font.clone(),
+        color: style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let mut runs: Vec<TextRun> = Vec::new();
     for w in bounds.windows(2) {
         let (start, end) = (w[0], w[1]);
-        if start >= end {
+        let len = disp(end) - disp(start);
+        if len == 0 {
             continue;
         }
-        let mut format = base.clone();
-        for (from, to, styles) in &deco.marks {
-            if *from <= start && *to >= end {
-                for s in styles {
-                    apply_style(&mut format, s);
-                }
-            }
+        let styles: Vec<MarkStyle> = deco
+            .marks
+            .iter()
+            .filter(|(from, to, _)| *from <= start && *to >= end)
+            .flat_map(|(_, _, s)| s.iter().cloned())
+            .collect();
+        let mut run = styled_run(&base, &styles, len);
+        if marked.is_some_and(|(a, b)| a <= start && b >= end) {
+            run.underline = Some(UnderlineStyle { thickness: px(1.0), color: Some(run.color), wavy: false });
         }
-        let mut piece = start;
-        for (i, c) in text[start..end].char_indices() {
-            if c != '\t' {
-                col += 1;
-                continue;
-            }
-            let at = start + i;
-            if at > piece {
-                job.sections.push(LayoutSection {
-                    leading_space: std::mem::take(&mut pending_space),
-                    byte_range: ByteIndex(piece)..ByteIndex(at),
-                    format: format.clone(),
-                });
-            }
-            let width = tab_size - col % tab_size;
-            col += width;
-            // The tab's space glyph goes after the extra space, so the
-            // position after the tab lands on the tab stop.
-            job.sections.push(LayoutSection {
-                leading_space: std::mem::take(&mut pending_space) + (width as f32 * char_w - space_w).max(0.0),
-                byte_range: ByteIndex(at)..ByteIndex(at + 1),
-                format: format.clone(),
-            });
-            piece = at + 1;
-        }
-        if piece < end {
-            job.sections.push(LayoutSection {
-                leading_space: std::mem::take(&mut pending_space),
-                byte_range: ByteIndex(piece)..ByteIndex(end),
-                format,
-            });
-        }
+        runs.push(run);
     }
-    if job.sections.is_empty() {
-        job.sections.push(LayoutSection { leading_space: 0.0, byte_range: ByteIndex(0)..ByteIndex(0), format: base });
+    if runs.is_empty() {
+        runs.push(TextRun { len: display.len(), ..base });
     }
-    let galley = fonts.layout_job(job);
-    let byte_of_char = if text.is_ascii() {
-        Vec::new()
-    } else {
-        let mut v: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
-        v.push(text.len());
-        v
-    };
-    LineLayout { galley, byte_of_char, len: text.len() }
+    let wrapped = window
+        .text_system()
+        .shape_text(SharedString::from(display), style.font_size, &runs, style.wrap_width.map(px), None)
+        .ok()
+        .and_then(|mut lines| lines.pop())
+        .unwrap_or_default();
+    LineLayout { wrapped, disp_of_doc, doc_len: text.len(), line_height: style.line_height }
 }
 
-/// A visual row of a line layout: its char range and rectangle.
-pub(crate) struct RowInfo {
-    pub index: usize,
-    pub start: usize,
-    pub end: usize,
-    pub rect: egui::Rect,
+fn map_off(disp_of_doc: &[usize], doc: usize) -> usize {
+    if disp_of_doc.is_empty() {
+        doc
+    } else {
+        disp_of_doc[doc.min(disp_of_doc.len() - 1)]
+    }
 }
 
 impl LineLayout {
-    pub fn height(&self, row_height: f32) -> f32 {
-        self.galley.size().y.max(row_height)
+    fn disp(&self, doc: usize) -> usize {
+        map_off(&self.disp_of_doc, doc.min(self.doc_len))
     }
 
-    pub fn width(&self) -> f32 {
-        self.galley.size().x
-    }
-
-    fn char_of(&self, byte: usize) -> usize {
-        if self.byte_of_char.is_empty() {
-            byte.min(self.len)
+    fn doc(&self, disp: usize) -> usize {
+        if self.disp_of_doc.is_empty() {
+            disp.min(self.doc_len)
         } else {
-            match self.byte_of_char.binary_search(&byte) {
-                Ok(i) => i,
+            // The first document offset at or after this display offset.
+            match self.disp_of_doc.binary_search(&disp) {
+                Ok(mut i) => {
+                    while i > 0 && self.disp_of_doc[i - 1] == disp {
+                        i -= 1;
+                    }
+                    i
+                }
                 Err(i) => i.saturating_sub(1),
             }
         }
     }
 
-    fn byte_of(&self, ci: usize) -> usize {
-        if self.byte_of_char.is_empty() {
-            ci.min(self.len)
-        } else {
-            self.byte_of_char[ci.min(self.byte_of_char.len() - 1)]
-        }
-    }
-
-    pub fn rows(&self) -> Vec<RowInfo> {
+    pub fn rows(&self) -> Vec<Row> {
+        let layout = &self.wrapped.unwrapped_layout;
+        let mut rows = Vec::new();
         let mut start = 0;
-        self.galley
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let end = start + row.glyphs.len();
-                let info = RowInfo { index, start, end, rect: row.rect() };
-                start = end + usize::from(row.ends_with_newline);
-                info
-            })
-            .collect()
-    }
-
-    // The x position of the boundary before char `ci` in a row.
-    fn x_in_row(&self, row: &RowInfo, ci: usize) -> f32 {
-        let placed = &self.galley.rows[row.index];
-        if ci <= row.start || placed.glyphs.is_empty() {
-            placed.pos.x
-        } else {
-            let g = &placed.glyphs[(ci - row.start - 1).min(placed.glyphs.len() - 1)];
-            placed.pos.x + g.max_x()
+        for b in self.wrapped.wrap_boundaries() {
+            let end = layout.runs[b.run_ix].glyphs[b.glyph_ix].index;
+            rows.push(Row { start, end });
+            start = end;
         }
+        rows.push(Row { start, end: layout.len });
+        rows
     }
 
-    // The row that shows the position `ci`, given its association: at the
-    // boundary between two wrapped rows, -1 picks the end of the first.
-    fn row_for(&self, rows: &[RowInfo], ci: usize, assoc: i32) -> usize {
+    pub fn height(&self) -> f32 {
+        (self.wrapped.wrap_boundaries().len() + 1) as f32 * self.line_height
+    }
+
+    pub fn width(&self) -> f32 {
+        f32::from(self.wrapped.unwrapped_layout.width)
+    }
+
+    fn x_in_row(&self, row: &Row, disp: usize) -> f32 {
+        let layout = &self.wrapped.unwrapped_layout;
+        f32::from(layout.x_for_index(disp) - layout.x_for_index(row.start))
+    }
+
+    // The row that shows display offset `disp`. At the boundary between
+    // two wrapped rows, assoc -1 picks the end of the first.
+    fn row_for(&self, rows: &[Row], disp: usize, assoc: i32) -> usize {
         let last = rows.len() - 1;
         for (k, row) in rows.iter().enumerate() {
-            if ci > row.end || (ci == row.end && k != last && assoc >= 0) {
+            if disp > row.end || (disp == row.end && k != last && assoc >= 0) {
                 continue;
             }
             return k;
@@ -258,45 +269,40 @@ impl LineLayout {
         last
     }
 
-    /// The rectangle (relative to the layout) of the position `byte`
-    /// within the line.
-    pub fn coords(&self, byte: usize, assoc: i32) -> egui::Rect {
+    /// The x position and row top (relative to the line) of a document
+    /// offset within the line.
+    pub fn coords(&self, doc: usize, assoc: i32) -> (f32, f32) {
         let rows = self.rows();
-        let ci = self.char_of(byte);
-        let row = &rows[self.row_for(&rows, ci, assoc)];
-        let x = self.x_in_row(row, ci);
-        egui::Rect::from_min_max(egui::pos2(x, row.rect.top()), egui::pos2(x, row.rect.bottom()))
+        let disp = self.disp(doc);
+        let k = self.row_for(&rows, disp, assoc);
+        (self.x_in_row(&rows[k], disp), k as f32 * self.line_height)
     }
 
-    /// The byte offset and association at the given point (relative to the
-    /// layout).
+    /// The document offset and association at a point relative to the line.
     pub fn pos_at(&self, x: f32, y: f32) -> (usize, i32) {
         let rows = self.rows();
         let last = rows.len() - 1;
-        let k = rows.iter().position(|r| y < r.rect.bottom()).unwrap_or(last);
+        let k = ((y / self.line_height).floor().max(0.0) as usize).min(last);
         let row = &rows[k];
-        for ci in row.start..row.end {
-            let mid = (self.x_in_row(row, ci) + self.x_in_row(row, ci + 1)) / 2.0;
-            if x < mid {
-                return (self.byte_of(ci), 1);
-            }
-        }
-        (self.byte_of(row.end), if k == last { 1 } else { -1 })
+        let layout = &self.wrapped.unwrapped_layout;
+        let abs = px(x) + layout.x_for_index(row.start);
+        let disp = layout.closest_index_for_x(abs).clamp(row.start, row.end);
+        let assoc = if disp == row.end && k != last { -1 } else { 1 };
+        (self.doc(disp), assoc)
     }
 
-    /// The byte range of the visual row that shows `byte`.
-    pub fn row_range(&self, byte: usize, assoc: i32) -> (usize, usize) {
+    /// The document range of the visual row that shows `doc`.
+    pub fn row_range(&self, doc: usize, assoc: i32) -> (usize, usize) {
         let rows = self.rows();
-        let row = &rows[self.row_for(&rows, self.char_of(byte), assoc)];
-        (self.byte_of(row.start), self.byte_of(row.end))
+        let row = &rows[self.row_for(&rows, self.disp(doc), assoc)];
+        (self.doc(row.start), self.doc(row.end))
     }
 
-    /// Rectangles (relative to the layout) covering the byte range
-    /// `from..to`, one per visual row. `to_edge` extends the last one to
-    /// `right`, for selections that continue past the line.
-    pub fn range_rects(&self, from: usize, to: usize, to_edge: bool, right: f32) -> Vec<egui::Rect> {
+    /// Rectangles (x0, top, x1) covering the document range `from..to`, one
+    /// per visual row. `to_edge` extends the last one to `right`.
+    pub fn range_rects(&self, from: usize, to: usize, to_edge: bool, right: f32) -> Vec<(f32, f32, f32)> {
         let rows = self.rows();
-        let (a, b) = (self.char_of(from), self.char_of(to));
+        let (a, b) = (self.disp(from), self.disp(to));
         let last = rows.len() - 1;
         let mut out = Vec::new();
         for (k, row) in rows.iter().enumerate() {
@@ -308,7 +314,7 @@ impl LineLayout {
             let x1 =
                 if continues || (k == last && to_edge) { right.max(x0) } else { self.x_in_row(row, b.min(row.end)) };
             if x1 > x0 || (to_edge && k == last) {
-                out.push(egui::Rect::from_min_max(egui::pos2(x0, row.rect.top()), egui::pos2(x1, row.rect.bottom())));
+                out.push((x0, k as f32 * self.line_height, x1));
             }
             if b <= row.end {
                 break;

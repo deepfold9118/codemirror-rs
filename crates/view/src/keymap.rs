@@ -1,10 +1,10 @@
-//! Key bindings. Port of `keymap.ts`, reading egui key events.
+//! Key bindings. Port of `keymap.ts`, reading GPUI keystrokes.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 use codemirror_state::{EditorState, Extension, Facet, StateCommand};
-use egui::{Key, Modifiers};
+use gpui::{Context, Keystroke, Window};
 
 use crate::editorview::EditorView;
 use crate::extension::{Cmd, Command};
@@ -190,15 +190,15 @@ pub(crate) fn normalize_key_name(name: &str, platform: Platform) -> String {
     result
 }
 
-fn modifiers(name: &str, mods: Modifiers, shift: bool) -> String {
+fn modifiers(name: &str, mods: &gpui::Modifiers, shift: bool) -> String {
     let mut name = name.to_string();
     if mods.alt {
         name = format!("Alt-{name}");
     }
-    if mods.ctrl {
+    if mods.control {
         name = format!("Ctrl-{name}");
     }
-    if mods.mac_cmd {
+    if mods.platform {
         name = format!("Meta-{name}");
     }
     if shift && mods.shift {
@@ -207,27 +207,27 @@ fn modifiers(name: &str, mods: Modifiers, shift: bool) -> String {
     name
 }
 
-/// The key name (as in `KeyboardEvent.key`, without shift applied) for an
-/// egui key.
-pub(crate) fn key_name(key: Key) -> String {
+/// The key name (as in `KeyboardEvent.key`, without shift applied) for a
+/// GPUI key.
+pub(crate) fn key_name(key: &str) -> String {
     match key {
-        Key::ArrowLeft => "ArrowLeft".into(),
-        Key::ArrowRight => "ArrowRight".into(),
-        Key::ArrowUp => "ArrowUp".into(),
-        Key::ArrowDown => "ArrowDown".into(),
-        Key::Space => " ".into(),
-        Key::Minus => "-".into(),
-        Key::PageUp => "PageUp".into(),
-        Key::PageDown => "PageDown".into(),
-        Key::Quote => "'".into(),
-        _ => {
-            let s = key.symbol_or_name();
-            if s.chars().count() == 1 {
-                s.to_lowercase()
-            } else {
-                s.to_string()
-            }
-        }
+        "left" => "ArrowLeft".into(),
+        "right" => "ArrowRight".into(),
+        "up" => "ArrowUp".into(),
+        "down" => "ArrowDown".into(),
+        "home" => "Home".into(),
+        "end" => "End".into(),
+        "pageup" => "PageUp".into(),
+        "pagedown" => "PageDown".into(),
+        "enter" => "Enter".into(),
+        "escape" => "Escape".into(),
+        "backspace" => "Backspace".into(),
+        "delete" => "Delete".into(),
+        "tab" => "Tab".into(),
+        "insert" => "Insert".into(),
+        "space" => " ".into(),
+        k if k.len() > 1 && k.starts_with('f') && k[1..].chars().all(|c| c.is_ascii_digit()) => k.to_uppercase(),
+        k => k.to_string(),
     }
 }
 
@@ -331,11 +331,11 @@ const PREFIX_TIMEOUT: f64 = 4.0;
 pub(crate) struct KeymapCache {
     source: Vec<Arc<Vec<KeyBinding>>>,
     built: Option<Arc<Keymap>>,
-    stored_prefix: Option<(String, String, f64)>,
+    stored_prefix: Option<(String, String, std::time::Instant)>,
 }
 
 impl KeymapCache {
-    fn get(&mut self, state: &EditorState) -> Arc<Keymap> {
+    pub(crate) fn get(&mut self, state: &EditorState) -> Arc<Keymap> {
         let maps = state.facet(&KEYMAP);
         let same = self.built.is_some()
             && maps.len() == self.source.len()
@@ -347,33 +347,27 @@ impl KeymapCache {
         }
         self.built.clone().unwrap()
     }
-
-    /// Which navigation keys the editor should keep from egui's focus
-    /// handling.
-    pub(crate) fn event_filter(&mut self, state: &EditorState) -> egui::EventFilter {
-        let map = self.get(state);
-        let has = |k: &str| map.scopes.get("editor").is_some_and(|s| s.contains_key(k));
-        egui::EventFilter {
-            tab: has("Tab") || has("Shift-Tab"),
-            horizontal_arrows: true,
-            vertical_arrows: true,
-            escape: has("Escape"),
-        }
-    }
 }
 
 /// Run the key handlers registered for a given scope. Returns true if any
 /// of the handlers handled the key.
-pub fn run_scope_handlers(view: &mut EditorView, key: Key, mods: Modifiers, scope: &str) -> bool {
+pub fn run_scope_handlers(
+    view: &mut EditorView,
+    keystroke: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
+    scope: &str,
+) -> bool {
     let state = view.state().clone();
     let map = view.keymaps.get(&state);
-    let now = view.now();
-    let name = key_name(key);
+    let now = std::time::Instant::now();
+    let mods = &keystroke.modifiers;
+    let name = key_name(&keystroke.key);
     let is_char = name.chars().count() == 1 && name != " ";
     let mut prefix = String::new();
     let mut prevented = false;
     if let Some((stored, stored_scope, time)) = view.keymaps.stored_prefix.take() {
-        if stored_scope == scope && now - time < PREFIX_TIMEOUT {
+        if stored_scope == scope && now.duration_since(time).as_secs_f64() < PREFIX_TIMEOUT {
             prefix = format!("{stored} ");
             prevented = true;
         }
@@ -381,7 +375,7 @@ pub fn run_scope_handlers(view: &mut EditorView, key: Key, mods: Modifiers, scop
     let Some(scope_obj) = map.scopes.get(scope) else { return prevented };
 
     let mut ran: Vec<Cmd> = Vec::new();
-    let mut run_for = |view: &mut EditorView, key: &str| -> bool {
+    let mut run_for = |view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>, key: &str| -> bool {
         let Some(binding) = scope_obj.get(key) else { return false };
         for action in &binding.run {
             match action {
@@ -394,7 +388,7 @@ pub fn run_scope_handlers(view: &mut EditorView, key: Key, mods: Modifiers, scop
                         continue;
                     }
                     ran.push(*cmd);
-                    if cmd.run(view) {
+                    if cmd.run(view, window, cx) {
                         return true;
                     }
                 }
@@ -406,41 +400,26 @@ pub fn run_scope_handlers(view: &mut EditorView, key: Key, mods: Modifiers, scop
         false
     };
 
-    // The name of a character key as typed: egui reports the base key, so
-    // shifted letters become uppercase and other shifted keys are unknown.
-    let typed = if is_char && mods.shift {
-        if name.chars().all(|c| c.is_ascii_alphabetic()) {
-            Some(name.to_uppercase())
-        } else {
-            None
-        }
-    } else {
-        Some(name.clone())
+    // The name of a character key as typed (CodeMirror's `event.key`):
+    // GPUI reports the base key plus, for typing keys, the typed character.
+    let typed = match &keystroke.key_char {
+        Some(c) if is_char && c.chars().count() == 1 => c.clone(),
+        _ if is_char && mods.shift && name.chars().all(|c| c.is_ascii_alphabetic()) => name.to_uppercase(),
+        _ => name.clone(),
     };
-    let mut handled = false;
-    if let Some(typed) = &typed {
-        if run_for(view, &format!("{prefix}{}", modifiers(typed, mods, !is_char))) {
-            handled = true;
-        }
-    }
+    let mut handled = run_for(view, window, cx, &format!("{prefix}{}", modifiers(&typed, mods, !is_char)));
     if !handled
         && is_char
-        && (mods.alt || mods.mac_cmd || mods.ctrl)
+        && (mods.alt || mods.platform || mods.control)
         // Ctrl-Alt may be used for AltGr on Windows.
-        && !(PLATFORM == Platform::Win && mods.ctrl && mods.alt)
+        && !(PLATFORM == Platform::Win && mods.control && mods.alt)
         // Alt combinations on macOS tend to be typed characters.
-        && !(PLATFORM == Platform::Mac && mods.alt && !(mods.ctrl || mods.mac_cmd))
-        && typed.as_deref() != Some(name.as_str())
+        && !(PLATFORM == Platform::Mac && mods.alt && !(mods.control || mods.platform))
+        && typed != name
     {
-        if run_for(view, &format!("{prefix}{}", modifiers(&name, mods, true))) {
-            handled = true;
-        }
+        handled = run_for(view, window, cx, &format!("{prefix}{}", modifiers(&name, mods, true)));
     } else if !handled && is_char && mods.shift {
-        if let Some(typed) = &typed {
-            if run_for(view, &format!("{prefix}{}", modifiers(typed, mods, true))) {
-                handled = true;
-            }
-        }
+        handled = run_for(view, window, cx, &format!("{prefix}{}", modifiers(&typed, mods, true)));
     }
     handled || prevented
 }
@@ -462,14 +441,13 @@ mod tests {
     }
 
     #[test]
-    fn names_egui_keys() {
-        assert_eq!(key_name(Key::A), "a");
-        assert_eq!(key_name(Key::ArrowLeft), "ArrowLeft");
-        assert_eq!(key_name(Key::OpenBracket), "[");
-        assert_eq!(key_name(Key::Backslash), "\\");
-        assert_eq!(key_name(Key::Num1), "1");
-        assert_eq!(key_name(Key::Enter), "Enter");
-        assert_eq!(key_name(Key::Home), "Home");
-        assert_eq!(key_name(Key::F5), "F5");
+    fn names_gpui_keys() {
+        assert_eq!(key_name("a"), "a");
+        assert_eq!(key_name("left"), "ArrowLeft");
+        assert_eq!(key_name("["), "[");
+        assert_eq!(key_name("pageup"), "PageUp");
+        assert_eq!(key_name("enter"), "Enter");
+        assert_eq!(key_name("f5"), "F5");
+        assert_eq!(key_name("space"), " ");
     }
 }

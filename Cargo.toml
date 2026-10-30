@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/state", "crates/language", "crates/view", "crates/commands", "crates/demo", "crates/gpui"]
+members = ["crates/state", "crates/language", "crates/view", "crates/commands", "crates/demo"]
 
 [workspace.package]
 edition = "2021"
@@ -11,5 +11,12 @@ rust-version = "1.86"
 [workspace.dependencies]
 crop = { version = "0.4", features = ["utf16-metric"] }
 unicode-segmentation = "1.13"
-egui = { version = "0.35", default-features = false }
-eframe = "0.35"
+gpui = "0.2.2"
+
+# Unoptimized builds of the editor are 20 to 40 times slower than release
+# builds; a light optimization level keeps debug builds usable.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

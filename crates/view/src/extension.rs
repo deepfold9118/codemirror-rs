@@ -13,12 +13,14 @@ use codemirror_state::{
 use crate::decoration::{Decoration, DecorationSet};
 use crate::editorview::EditorView;
 use crate::theme::Theme;
+use gpui::{Context, Window};
 
 /// Command functions are used in key bindings and other types of user
 /// actions. Given an editor view, they check whether their effect can
 /// apply to the editor, and if it can, perform it as a side effect (which
-/// usually means dispatching a transaction) and return `true`.
-pub type Command = fn(&mut EditorView) -> bool;
+/// usually means dispatching a transaction) and return `true`. They get the
+/// GPUI window, which motion commands need for text layout.
+pub type Command = fn(&mut EditorView, &mut Window, &mut Context<EditorView>) -> bool;
 
 /// A command that a key binding runs: either a view [`Command`] or a
 /// [`StateCommand`], which the view runs against its own state.
@@ -30,10 +32,10 @@ pub enum Cmd {
 
 impl Cmd {
     /// Run the command on the view.
-    pub fn run(self, view: &mut EditorView) -> bool {
+    pub fn run(self, view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
         match self {
-            Cmd::View(f) => f(view),
-            Cmd::State(f) => view.run_state_command(f),
+            Cmd::View(f) => f(view, window, cx),
+            Cmd::State(f) => view.run_state_command(f, cx),
         }
     }
 
@@ -64,7 +66,7 @@ pub static LINE_WRAPPING: LazyLock<Facet<bool, bool>> =
     LazyLock::new(|| Facet::define(FacetSpec::combine(|values: &[bool]| values.iter().any(|v| *v)).compare_eq()));
 
 /// The visual theme. The first (highest-precedence) value is used; without
-/// one, a theme is derived from the egui visuals.
+/// one, [`Theme::dark`] is used.
 pub static THEME: LazyLock<Facet<Arc<Theme>, Option<Arc<Theme>>>> =
     LazyLock::new(|| Facet::define(FacetSpec::combine(|values: &[Arc<Theme>]| values.first().cloned())));
 

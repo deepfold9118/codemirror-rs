@@ -1,7 +1,8 @@
 //! Port of the cases in CodeMirror's `test/webtest-commands.ts` that don't
-//! need widgets or CSS, run against a headless egui context. CodeMirror's
-//! "narrow" theme (13ch wide) becomes a window sized for 13 columns.
-//! The CJK `Intl.Segmenter` cases are not ported.
+//! need widgets or CSS, run in GPUI's test context (whose text system gives
+//! every character the same width). CodeMirror's "narrow" theme (13ch
+//! wide) becomes a window sized for 13 columns. The CJK `Intl.Segmenter`
+//! cases are not ported.
 
 mod common;
 
@@ -10,44 +11,47 @@ use std::sync::Arc;
 
 use codemirror_commands::*;
 use codemirror_state::{AnyValue, EditorState, Extension, LanguageData, LanguageDataProvider, LANGUAGE_DATA};
-use codemirror_view::{line_wrapping, EditorView};
+use codemirror_view::{keymap, line_wrapping, EditorView};
 use common::{mk_state, state_str};
-use eframe::egui;
+use gpui::{px, size, Context, Entity, TestAppContext, VisualTestContext, Window};
 
-fn frame(ctx: &egui::Context, view: &mut EditorView, width: f32) {
-    let input = egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 300.0))),
-        ..Default::default()
-    };
-    let _ = ctx.run_ui(input, |ui| {
-        view.ui(ui);
-    });
+type Cmd = dyn Fn(&mut EditorView, &mut Window, &mut Context<EditorView>) -> bool;
+
+// Size the test window (the view fills it) and let it draw.
+fn draw(cx: &mut VisualTestContext, view: &Entity<EditorView>, width: f32) {
+    cx.simulate_resize(size(px(width), px(300.)));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
 }
 
-fn test_cmd_with(before: &str, after: &str, command: &dyn Fn(&mut EditorView) -> bool, ext: Extension, narrow: bool) {
+fn test_cmd_with(before: &str, after: &str, command: &Cmd, ext: Extension, narrow: bool) {
     let ext = if narrow { Extension::list([ext, line_wrapping()]) } else { ext };
-    let mut view = EditorView::new(mk_state(before, ext));
-    let ctx = egui::Context::default();
-    frame(&ctx, &mut view, 800.0);
+    let state = mk_state(before, ext);
+    let mut app = TestAppContext::single();
+    let (view, cx) = app.add_window_view(|_, cx| EditorView::new(state, cx));
+    draw(cx, &view, 800.0);
     if narrow {
-        let char_w = view.default_character_width();
-        let bar = ctx.global_style().spacing.scroll.allocated_width();
-        let theme = view.theme();
-        frame(&ctx, &mut view, theme.padding_left + theme.padding_right + bar + 13.0 * char_w + 1.0);
-        frame(&ctx, &mut view, theme.padding_left + theme.padding_right + bar + 13.0 * char_w + 1.0);
+        let (char_w, pad) = view.read_with(cx, |v, _| (v.default_character_width(), v.theme().padding_left));
+        // Padding, scrollbar (12) and the 2px gap before it, then 13 columns.
+        let width = pad + 14.0 + 13.0 * char_w + 0.5;
+        draw(cx, &view, width);
+        draw(cx, &view, width);
     }
-    command(&mut view);
-    assert_eq!(state_str(view.state()), after, "from {before:?}");
+    view.update_in(cx, |v, window, cx| {
+        command(v, window, cx);
+    });
+    let result = view.read_with(cx, |v, _| state_str(v.state()));
+    assert_eq!(result, after, "from {before:?}");
 }
 
-fn test_cmd(before: &str, after: &str, command: fn(&mut EditorView) -> bool) {
+fn test_cmd(before: &str, after: &str, command: codemirror_view::Command) {
     test_cmd_with(before, after, &command, Extension::empty(), false);
 }
 
-fn twice(command: fn(&mut EditorView) -> bool) -> impl Fn(&mut EditorView) -> bool {
-    move |v| {
-        command(v);
-        command(v);
+fn twice(command: codemirror_view::Command) -> impl Fn(&mut EditorView, &mut Window, &mut Context<EditorView>) -> bool {
+    move |v, w, cx| {
+        command(v, w, cx);
+        command(v, w, cx);
         true
     }
 }
@@ -140,7 +144,9 @@ fn extends_select_line_down() {
     test_cmd("on|e\ntwo\nthree", "on<e\ntw>o\nthree", select_line_down);
     test_cmd_with("on|e\nt\nthree", "on<e\nt\nth>ree", &twice(select_line_down), Extension::empty(), false);
     test_cmd("one\nt|wo", "one\nt<wo>", select_line_down);
-    let down_up = |v: &mut EditorView| select_line_down(v) && select_line_up(v);
+    let down_up = |v: &mut EditorView, w: &mut Window, cx: &mut Context<EditorView>| {
+        select_line_down(v, w, cx) && select_line_up(v, w, cx)
+    };
     test_cmd_with("one\ntwo\nth|ree", "one\ntwo<\nth>ree", &down_up, Extension::empty(), false);
     test_cmd_with(
         "|dandelion dandelion dandelion",
@@ -157,7 +163,9 @@ fn extends_select_line_up() {
     test_cmd("one\ntwo\nt|hree", "one\nt<wo\nt>hree", select_line_up);
     test_cmd_with("one\nt\nthr|ee", "one<\nt\nthr>ee", &twice(select_line_up), Extension::empty(), false);
     test_cmd("on|e\ntwo", "<on>e\ntwo", select_line_up);
-    let up_down = |v: &mut EditorView| select_line_up(v) && select_line_down(v);
+    let up_down = |v: &mut EditorView, w: &mut Window, cx: &mut Context<EditorView>| {
+        select_line_up(v, w, cx) && select_line_down(v, w, cx)
+    };
     test_cmd_with("on|e\ntwo\nthree", "on<e\n>two\nthree", &up_down, Extension::empty(), false);
 }
 
@@ -184,38 +192,24 @@ fn moves_by_group_and_line_boundary() {
 }
 
 #[test]
-fn types_and_runs_key_bindings_from_egui_events() {
+fn types_and_runs_key_bindings_from_events() {
     let mut bindings = default_keymap();
     bindings.extend(history_keymap());
-    let ext = Extension::list([history(HistoryConfig::default()), codemirror_view::keymap(bindings)]);
-    let mut view = EditorView::new(mk_state("|", ext));
-    view.focus();
-    let ctx = egui::Context::default();
-    frame(&ctx, &mut view, 800.0);
-    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
-    let run = |view: &mut EditorView, events: Vec<egui::Event>| {
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 300.0))),
-            events,
-            ..Default::default()
-        };
-        let _ = ctx.run_ui(input, |ui| {
-            view.ui(ui);
-        });
-    };
-    run(&mut view, vec![egui::Event::Text("abc".into())]);
-    assert_eq!(state_str(view.state()), "abc|");
-    run(
-        &mut view,
-        vec![key(egui::Key::ArrowLeft, egui::Modifiers::NONE), key(egui::Key::Backspace, egui::Modifiers::NONE)],
-    );
-    assert_eq!(state_str(view.state()), "a|c");
-    run(&mut view, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
-    assert_eq!(state_str(view.state()), "a\n|c");
-    // On Windows and Linux, egui sets both `ctrl` and `command` for Ctrl.
-    let ctrl = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
-    run(&mut view, vec![key(egui::Key::Z, ctrl)]);
-    assert_eq!(view.state().doc_string(), "ac");
-    run(&mut view, vec![key(egui::Key::ArrowLeft, egui::Modifiers::SHIFT)]);
-    assert!(!view.state().selection().main().is_empty());
+    let ext = Extension::list([history(HistoryConfig::default()), keymap(bindings)]);
+    let state = mk_state("|", ext);
+    let mut app = TestAppContext::single();
+    let (view, cx) = app.add_window_view(|_, cx| EditorView::new(state, cx));
+    view.update_in(cx, |v, window, _| v.focus(window));
+    draw(cx, &view, 800.0);
+    let doc = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| state_str(v.state()));
+    cx.simulate_input("abc");
+    assert_eq!(doc(cx), "abc|");
+    cx.simulate_keystrokes("left backspace");
+    assert_eq!(doc(cx), "a|c");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(doc(cx), "a\n|c");
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(view.read_with(cx, |v, _| v.state().doc_string()), "ac");
+    cx.simulate_keystrokes("shift-left");
+    assert!(view.read_with(cx, |v, _| !v.state().selection().main().is_empty()));
 }

@@ -1,24 +1,29 @@
-//! The editor view. Port of `editorview.ts`, drawn with egui: instead of
-//! keeping a DOM in sync, [`EditorView::ui`] lays out and paints the lines
-//! in view each frame, and measures them into the height map.
+//! The editor view. Port of `editorview.ts`, drawn with GPUI: the view is
+//! a GPUI entity, and [`EditorElement`](crate::element) lays out and paints
+//! the lines in view each frame, measuring them into the height map.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::ops::Range;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use codemirror_state::{
-    EditorState, Facet, FacetSpec, SelectionRange, StateCommand, StateEffect, Transaction, TransactionSpec,
+    EditorSelection, EditorState, Extension, Facet, FacetSpec, StateCommand, StateEffect, Transaction, TransactionSpec,
 };
-use egui::{Pos2, Rect, Sense, Vec2};
+use gpui::{
+    div, prelude::*, px, App, Bounds, Context, CursorStyle, FocusHandle, Focusable, MouseButton, Pixels, Point, Task,
+    Window,
+};
 
-use crate::decoration::{BlockType, DecorationSet};
+use crate::decoration::DecorationSet;
+use crate::element::EditorElement;
 use crate::extension::{
     scroll_target, update_flag, DecorationSource, PluginInstance, PluginValue, ScrollStrategy, ScrollTarget,
-    ViewUpdate, DECORATIONS, LINE_WRAPPING, SCROLL_INTO_VIEW, THEME, UPDATE_LISTENER, VIEW_PLUGIN,
+    ViewPlugin, ViewUpdate, DECORATIONS, LINE_WRAPPING, SCROLL_INTO_VIEW, THEME, UPDATE_LISTENER, VIEW_PLUGIN,
 };
-use crate::heightmap::{clear_height_change_flag, height_change_flag, BlockInfo, MeasuredHeights, QueryType};
-use crate::input::InputState;
+use crate::heightmap::{BlockInfo, QueryType};
+use crate::input::MouseSelection;
 use crate::keymap::KeymapCache;
-use crate::layout::{layout_line, line_decorations, LineLayout};
+use crate::layout::{layout_line, line_decorations, LineLayout, LineStyle};
 use crate::theme::Theme;
 use crate::viewstate::{ViewState, Viewport};
 
@@ -31,93 +36,78 @@ pub static HIGHLIGHT_ACTIVE_LINE: LazyLock<Facet<bool, bool>> =
     LazyLock::new(|| Facet::define(FacetSpec::combine(|values: &[bool]| values.iter().any(|v| *v)).compare_eq()));
 
 /// An extension that shows line numbers in a gutter.
-pub fn line_numbers() -> codemirror_state::Extension {
+pub fn line_numbers() -> Extension {
     LINE_NUMBERS.of(true)
 }
 
 /// An extension that highlights the lines that hold a cursor.
-pub fn highlight_active_line() -> codemirror_state::Extension {
+pub fn highlight_active_line() -> Extension {
     HIGHLIGHT_ACTIVE_LINE.of(true)
 }
 
 /// An extension that makes lines wrap at the editor width.
-pub fn line_wrapping() -> codemirror_state::Extension {
+pub fn line_wrapping() -> Extension {
     LINE_WRAPPING.of(true)
 }
 
-// Geometry from the last frame, in screen coordinates.
-#[derive(Clone, Copy)]
+// Geometry from the last frame.
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Geometry {
-    // Screen position of document position (0, 0).
-    pub origin: Pos2,
-    // The visible part of the editor.
-    pub visible: Rect,
-    pub wrap_width: Option<f32>,
-    pub gutter_width: f32,
-    pub row_height: f32,
+    pub bounds: Bounds<Pixels>,
     pub char_width: f32,
-    pub text_height: f32,
-    pub max_line_width: f32,
+    pub gutter_width: f32,
+    pub wrap_width: Option<f32>,
     pub valid: bool,
 }
 
-impl Default for Geometry {
-    fn default() -> Self {
-        Geometry {
-            origin: Pos2::ZERO,
-            visible: Rect::NOTHING,
-            wrap_width: None,
-            gutter_width: 0.0,
-            row_height: 0.0,
-            char_width: 0.0,
-            text_height: 0.0,
-            max_line_width: 0.0,
-            valid: false,
-        }
-    }
-}
+pub(crate) const SCROLLBAR_WIDTH: f32 = 12.0;
+const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
-const VIEWPORT_MARGIN: f64 = 300.0;
-
-/// An editor view displays an [`EditorState`] and handles input. Call
-/// [`ui`](EditorView::ui) every frame to draw it.
+/// An editor view displays an [`EditorState`] and handles input. It is a
+/// GPUI entity: create it with `cx.new(|cx| EditorView::new(state, cx))`
+/// and render it as a child element.
 pub struct EditorView {
     state: EditorState,
     plugins: Vec<PluginInstance>,
     pub(crate) vs: ViewState,
+    pub(crate) focus_handle: FocusHandle,
     pub(crate) geo: Geometry,
-    pub(crate) ctx: Option<egui::Context>,
-    pub(crate) id: egui::Id,
-    pub(crate) input: InputState,
+    pub(crate) scroll: (f32, f32),
+    pub(crate) max_line_width: f32,
+    pub(crate) marked: Option<Range<usize>>,
+    pub(crate) cursor_visible: bool,
+    pub(crate) focused: bool,
+    pub(crate) mouse: Option<MouseSelection>,
+    pub(crate) scrollbar_drag: Option<(f32, f32)>,
+    pub(crate) last_pointer: Option<Point<Pixels>>,
+    pub(crate) last_linewise_copy: Option<String>,
     pub(crate) keymaps: KeymapCache,
-    default_theme: Arc<Theme>,
-    has_focus: bool,
-    focus_requested: bool,
-    // Time of the last selection change, to restart the caret blink.
-    blink_start: f64,
-    scroll_frames: u8,
+    blink_epoch: usize,
+    _blink: Option<Task<()>>,
 }
-
-static NEXT_VIEW_ID: AtomicU64 = AtomicU64::new(0);
 
 impl EditorView {
     /// Create a view for the given state.
-    pub fn new(state: EditorState) -> EditorView {
+    pub fn new(state: EditorState, cx: &mut Context<Self>) -> EditorView {
         let vs = ViewState::new(&state);
         let mut view = EditorView {
             state,
             plugins: Vec::new(),
             vs,
+            focus_handle: cx.focus_handle(),
             geo: Geometry::default(),
-            ctx: None,
-            id: egui::Id::new(("codemirror-view", NEXT_VIEW_ID.fetch_add(1, Ordering::Relaxed))),
-            input: InputState::default(),
+            scroll: (0.0, 0.0),
+            max_line_width: 0.0,
+            marked: None,
+            cursor_visible: true,
+            focused: false,
+            mouse: None,
+            scrollbar_drag: None,
+            last_pointer: None,
+            last_linewise_copy: None,
             keymaps: KeymapCache::default(),
-            default_theme: Arc::new(Theme::dark()),
-            has_focus: false,
-            focus_requested: false,
-            blink_start: 0.0,
-            scroll_frames: 0,
+            blink_epoch: 0,
+            _blink: None,
         };
         view.update_plugins_config();
         view
@@ -128,32 +118,27 @@ impl EditorView {
         &self.state
     }
 
-    /// The egui id of the editor widget.
-    pub fn id(&self) -> egui::Id {
-        self.id
-    }
-
     /// Dispatch a transaction. Its start state must be the view's current
     /// state.
-    pub fn dispatch(&mut self, tr: Transaction) {
-        self.update(vec![tr]);
+    pub fn dispatch(&mut self, tr: Transaction, cx: &mut Context<Self>) {
+        self.update(vec![tr], cx);
     }
 
     /// Create a transaction from the given spec and dispatch it.
-    pub fn dispatch_spec(&mut self, spec: impl Into<TransactionSpec>) {
+    pub fn dispatch_spec(&mut self, spec: impl Into<TransactionSpec>, cx: &mut Context<Self>) {
         let tr = self.state.update(spec);
-        self.dispatch(tr);
+        self.dispatch(tr, cx);
     }
 
     /// Run a state command against the view's state, dispatching what it
     /// produces.
-    pub fn run_state_command(&mut self, command: StateCommand) -> bool {
+    pub fn run_state_command(&mut self, command: StateCommand, cx: &mut Context<Self>) -> bool {
         let state = self.state.clone();
         let mut trs = Vec::new();
         let result = command(&state, &mut |tr| trs.push(tr));
         for tr in trs {
             if tr.start_state().ptr_eq(&self.state) {
-                self.dispatch(tr);
+                self.dispatch(tr, cx);
             }
         }
         result
@@ -162,7 +147,7 @@ impl EditorView {
     /// Update the view for the given transactions, which must each start
     /// from the state produced by the one before (the first from the
     /// current state).
-    pub fn update(&mut self, transactions: Vec<Transaction>) {
+    pub fn update(&mut self, transactions: Vec<Transaction>, cx: &mut Context<Self>) {
         let mut state = self.state.clone();
         for tr in &transactions {
             assert!(
@@ -172,45 +157,55 @@ impl EditorView {
             state = tr.state().clone();
         }
         let reconfigured = transactions.iter().any(|tr| tr.reconfigured());
-        let selection_changed = transactions.iter().any(|tr| tr.selection().is_some() || tr.doc_changed());
+        let selection_moved = transactions.iter().any(|tr| tr.selection().is_some() || tr.doc_changed());
         let mut update = ViewUpdate::new(self.state.clone(), state.clone(), transactions);
         self.state = state;
         if reconfigured {
             self.update_plugins_config();
         }
         self.vs.update(&mut update);
-        if selection_changed {
-            self.blink_start = self.now();
-            self.scroll_frames = 0;
+        if selection_moved {
+            self.restart_blink(cx);
         }
-        self.finish_update(update);
+        self.finish_update(update, cx);
     }
 
     /// Replace the view's state without a transaction, as when loading a
     /// different document. Resets the view's layout information.
-    pub fn set_state(&mut self, state: EditorState) {
+    pub fn set_state(&mut self, state: EditorState, cx: &mut Context<Self>) {
         self.state = state;
         self.vs = ViewState::new(&self.state);
         self.update_plugins_config();
-        self.geo.max_line_width = 0.0;
+        self.max_line_width = 0.0;
+        self.scroll = (0.0, 0.0);
+        self.marked = None;
+        self.geo.valid = false;
+        cx.notify();
     }
 
-    fn finish_update(&mut self, update: ViewUpdate) {
+    fn finish_update(&mut self, update: ViewUpdate, cx: &mut Context<Self>) {
         for p in &mut self.plugins {
             p.value.update(&update);
         }
         for listener in self.state.facet(&UPDATE_LISTENER) {
             listener(&update);
         }
-        if let Some(ctx) = &self.ctx {
-            ctx.request_repaint();
-        }
+        cx.notify();
     }
 
-    fn notify(&mut self, flags: u8) {
+    pub(crate) fn notify_flags(&mut self, flags: u8, cx: &mut Context<Self>) {
         let mut update = ViewUpdate::new(self.state.clone(), self.state.clone(), Vec::new());
         update.flags = flags;
-        self.finish_update(update);
+        for p in &mut self.plugins {
+            p.value.update(&update);
+        }
+        for listener in self.state.facet(&UPDATE_LISTENER) {
+            listener(&update);
+        }
+        // Plugins may have changed their decorations: draw again.
+        if flags & (update_flag::VIEWPORT | update_flag::FOCUS) != 0 && !self.plugins.is_empty() {
+            cx.notify();
+        }
     }
 
     fn update_plugins_config(&mut self) {
@@ -230,12 +225,12 @@ impl EditorView {
     }
 
     /// Get the value of a view plugin, if it is active in this view.
-    pub fn plugin<V: PluginValue>(&self, plugin: &crate::ViewPlugin<V>) -> Option<&V> {
+    pub fn plugin<V: PluginValue>(&self, plugin: &ViewPlugin<V>) -> Option<&V> {
         self.plugin_by_id(plugin.id)
     }
 
     /// Mutable access to a view plugin's value.
-    pub fn plugin_mut<V: PluginValue>(&mut self, plugin: &crate::ViewPlugin<V>) -> Option<&mut V> {
+    pub fn plugin_mut<V: PluginValue>(&mut self, plugin: &ViewPlugin<V>) -> Option<&mut V> {
         let p = self.plugins.iter_mut().find(|p| p.id == plugin.id)?;
         (&mut *p.value as &mut dyn std::any::Any).downcast_mut::<V>()
     }
@@ -247,15 +242,12 @@ impl EditorView {
 
     /// Whether the editor has keyboard focus.
     pub fn has_focus(&self) -> bool {
-        self.has_focus
+        self.focused
     }
 
-    /// Move keyboard focus to the editor (takes effect in the next frame).
-    pub fn focus(&mut self) {
-        self.focus_requested = true;
-        if let Some(ctx) = &self.ctx {
-            ctx.memory_mut(|m| m.request_focus(self.id));
-        }
+    /// Move keyboard focus to the editor.
+    pub fn focus(&self, window: &mut Window) {
+        window.focus(&self.focus_handle);
     }
 
     /// Whether lines wrap.
@@ -263,26 +255,32 @@ impl EditorView {
         *self.state.facet(&LINE_WRAPPING)
     }
 
+    pub(crate) fn line_numbers(&self) -> bool {
+        *self.state.facet(&LINE_NUMBERS)
+    }
+
+    pub(crate) fn highlight_active_line(&self) -> bool {
+        *self.state.facet(&HIGHLIGHT_ACTIVE_LINE)
+    }
+
     /// The theme in use.
     pub fn theme(&self) -> Arc<Theme> {
-        self.state.facet(&THEME).clone().unwrap_or_else(|| self.default_theme.clone())
+        static DEFAULT: LazyLock<Arc<Theme>> = LazyLock::new(|| Arc::new(Theme::dark()));
+        self.state.facet(&THEME).clone().unwrap_or_else(|| DEFAULT.clone())
     }
 
     /// The height of a line of text.
     pub fn default_line_height(&self) -> f32 {
-        if self.geo.valid {
-            self.geo.row_height
-        } else {
-            self.theme().row_height()
-        }
+        self.theme().row_height()
     }
 
-    /// The width of a character (`0`) in the editor font.
+    /// The width of a character (`0`) in the editor font, from the last
+    /// frame.
     pub fn default_character_width(&self) -> f32 {
         if self.geo.valid {
             self.geo.char_width
         } else {
-            self.theme().font.size * 0.6
+            self.theme().font_size * 0.55
         }
     }
 
@@ -295,16 +293,15 @@ impl EditorView {
     /// The height of the visible part of the editor.
     pub fn visible_height(&self) -> f32 {
         if self.geo.valid {
-            self.geo.visible.height()
+            f32::from(self.geo.bounds.size.height)
         } else {
             self.default_line_height() * 20.0
         }
     }
 
-    /// The screen rectangle of the visible part of the editor, from the last
-    /// frame.
-    pub fn visible_rect(&self) -> Rect {
-        self.geo.visible
+    /// The window bounds of the editor, from the last frame.
+    pub fn visible_rect(&self) -> Bounds<Pixels> {
+        self.geo.bounds
     }
 
     /// The total height of the document.
@@ -312,9 +309,10 @@ impl EditorView {
         self.vs.height_map.height()
     }
 
-    /// The screen position of the top of the document, from the last frame.
-    pub fn document_top(&self) -> f32 {
-        self.geo.origin.y
+    /// The window position of the top of the document, from the last
+    /// frame.
+    pub fn document_top(&self) -> Pixels {
+        self.origin().y
     }
 
     /// Find the line block (a line plus any block widgets attached to it)
@@ -337,11 +335,7 @@ impl EditorView {
 
     /// An effect that scrolls the given position into view.
     pub fn scroll_into_view(pos: usize, y: ScrollStrategy) -> StateEffect {
-        SCROLL_INTO_VIEW.of(ScrollTarget { y, ..scroll_target(codemirror_state::EditorSelection::cursor(pos)) })
-    }
-
-    pub(crate) fn now(&self) -> f64 {
-        self.ctx.as_ref().map_or(0.0, |c| c.input(|i| i.time))
+        SCROLL_INTO_VIEW.of(ScrollTarget { y, ..scroll_target(EditorSelection::cursor(pos)) })
     }
 
     /// All decoration sets, including the ones computed from the view.
@@ -357,8 +351,7 @@ impl EditorView {
     }
 
     /// Lay out the text line starting at `line_from`.
-    pub(crate) fn layout(&self, line_from: usize, decos: Option<&[DecorationSet]>) -> Option<LineLayout> {
-        let ctx = self.ctx.as_ref()?;
+    pub(crate) fn layout(&self, window: &mut Window, line_from: usize, decos: Option<&[DecorationSet]>) -> LineLayout {
         let line = self.state.doc().line_at(line_from);
         let owned;
         let decos = match decos {
@@ -369,355 +362,109 @@ impl EditorView {
             }
         };
         let deco = line_decorations(decos, line.from, line.to);
+        let marked = self
+            .marked
+            .as_ref()
+            .and_then(|m| (m.start >= line.from && m.end <= line.to).then(|| (m.start - line.from, m.end - line.from)));
         let theme = self.theme();
-        let tab_size = self.state.tab_size();
-        Some(ctx.fonts_mut(|f| layout_line(f, &theme, &line.text, &deco, self.geo.wrap_width, tab_size)))
+        let font = theme.font();
+        let style = LineStyle {
+            font: &font,
+            font_size: px(theme.font_size),
+            color: theme.text,
+            line_height: theme.row_height(),
+            wrap_width: if self.line_wrapping() { self.geo.wrap_width } else { None },
+            tab_size: self.state.tab_size(),
+        };
+        layout_line(window, &line.text, &style, &deco, marked)
     }
 
-    /// Draw the editor, handle its input, and return the response of the
-    /// editor widget (for context menus and the like).
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> egui::Response {
-        self.ctx = Some(ui.ctx().clone());
-        let visuals_theme = Theme::from_visuals(ui.visuals());
-        if *self.default_theme != visuals_theme {
-            self.default_theme = Arc::new(visuals_theme);
-        }
+    /// Window position of document coordinates (0, 0).
+    pub(crate) fn origin(&self) -> Point<Pixels> {
+        let b = self.geo.bounds;
         let theme = self.theme();
-        let row_height = theme.row_height();
-        let (char_width, text_height) =
-            ui.ctx().fonts_mut(|f| (f.glyph_width(&theme.font, '0'), f.row_height(&theme.font)));
-        let wrapping = self.line_wrapping();
-        let gutter_width = if *self.state.facet(&LINE_NUMBERS) {
-            let digits = self.state.doc().lines().to_string().len().max(2);
-            digits as f32 * char_width + 12.0
-        } else {
-            0.0
-        };
-        let text_left = gutter_width + theme.padding_left;
-        let bar = ui.spacing().scroll.allocated_width();
-        let avail = ui.available_size();
-        let wrap_width =
-            if wrapping { Some((avail.x - text_left - theme.padding_right - bar).max(char_width * 4.0)) } else { None };
-
-        // Refresh the height estimates when the metrics changed.
-        let line_length = wrap_width.map_or(1e9, |w| (w / char_width) as f64);
-        let width_changed = match (wrap_width, self.geo.wrap_width) {
-            (Some(a), Some(b)) => (a - b).abs() > char_width,
-            (a, b) => a.is_some() != b.is_some(),
-        };
-        let changed = self.vs.oracle.refresh(
-            wrapping,
-            row_height as f64,
-            char_width as f64,
-            text_height as f64,
-            line_length,
-            &[],
-        );
-        let geometry_changed = changed || width_changed || !self.geo.valid;
-        self.geo.wrap_width = wrap_width;
-        self.geo.gutter_width = gutter_width;
-        self.geo.row_height = row_height;
-        self.geo.char_width = char_width;
-        self.geo.text_height = text_height;
-        if geometry_changed {
-            let map = std::mem::replace(&mut self.vs.height_map, crate::heightmap::HeightMap::empty());
-            self.vs.height_map = map.update_height(&self.vs.oracle, 0, true, None);
-        }
-
-        let content_width = if wrapping {
-            avail.x - bar
-        } else {
-            (text_left + self.geo.max_line_width + theme.padding_right + char_width).max(avail.x - bar)
-        };
-        let total = Vec2::new(content_width, self.vs.height_map.height() as f32 + theme.padding_y * 2.0);
-        let scroll = if wrapping { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
-        let output = scroll
-            .id_salt(self.id.with("scroll"))
-            .auto_shrink([false, false])
-            .show_viewport(ui, |ui, viewport| self.frame(ui, viewport, total, &theme, text_left));
-        if geometry_changed {
-            self.notify(update_flag::GEOMETRY);
-        }
-        output.inner
+        Point::new(
+            b.origin.x + px(self.geo.gutter_width + theme.padding_left - self.scroll.0),
+            b.origin.y + px(theme.padding_y - self.scroll.1),
+        )
     }
 
-    fn frame(
-        &mut self,
-        ui: &mut egui::Ui,
-        viewport: Rect,
-        total: Vec2,
-        theme: &Theme,
-        text_left: f32,
-    ) -> egui::Response {
-        let (rect, _) = ui.allocate_exact_size(total, Sense::hover());
-        let resp = ui.interact(rect, self.id, Sense::click_and_drag());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Editor"));
-        self.geo.origin = rect.min + Vec2::new(text_left, theme.padding_y);
-        self.geo.visible = ui.clip_rect();
-        self.geo.valid = true;
-
-        if self.focus_requested || resp.clicked() || resp.drag_started() {
-            self.focus_requested = false;
-            ui.memory_mut(|m| m.request_focus(self.id));
-        }
-        let focused = ui.memory(|m| m.has_focus(self.id));
-        if focused != self.has_focus {
-            self.has_focus = focused;
-            self.blink_start = self.now();
-            self.notify(update_flag::FOCUS);
-        }
-        if focused {
-            let filter = self.keymaps.event_filter(&self.state);
-            ui.memory_mut(|m| m.set_focus_lock_filter(self.id, filter));
-            self.handle_events(ui);
-        }
-        self.handle_mouse(ui, &resp);
-
-        let lines = self.measure(viewport, theme);
-        self.paint(ui, rect, &lines, focused, theme);
-
-        if self.vs.scroll_target.is_some() {
-            self.scroll_to_target(ui);
-        }
-        resp
+    pub(crate) fn max_scroll_y(&self) -> f32 {
+        (self.content_height() as f32 + self.theme().padding_y * 2.0 - self.visible_height()).max(0.0)
     }
 
-    // Lay out the lines around the visible part of the document, update the
-    // height map with their sizes, and return them with their positions.
-    fn measure(&mut self, viewport: Rect, theme: &Theme) -> Vec<(BlockInfo, Option<LineLayout>)> {
-        let decos = self.decoration_sets();
-        let top = (viewport.min.y - theme.padding_y) as f64;
-        let bottom = (viewport.max.y - theme.padding_y) as f64;
-        let row_height = theme.row_height();
-        let mut height_changed = false;
-        let mut result = Vec::new();
-        let mut range = Viewport::default();
-        for attempt in 0..3 {
-            let oracle = &self.vs.oracle;
-            let first =
-                self.vs.height_map.line_at((top - VIEWPORT_MARGIN).max(0.0), QueryType::ByHeight, oracle, 0.0, 0);
-            let last = self.vs.height_map.line_at(bottom + VIEWPORT_MARGIN, QueryType::ByHeight, oracle, 0.0, 0);
-            range = Viewport { from: first.from, to: last.to() };
-            let mut blocks = Vec::new();
-            self.vs.height_map.for_each_line(range.from, range.to, oracle, 0.0, 0, &mut |b| blocks.push(b));
-            let mut heights = Vec::new();
-            result.clear();
-            for block in blocks {
-                let mut layout = None;
-                let parts: Vec<BlockInfo> = match block.children() {
-                    Some(c) => c.to_vec(),
-                    None => vec![block.clone()],
-                };
-                for part in &parts {
-                    if part.block_type() == BlockType::Text {
-                        let l = self.layout(part.from, Some(&decos));
-                        if let Some(l) = &l {
-                            self.geo.max_line_width = self.geo.max_line_width.max(l.width());
-                            heights.push(l.height(row_height) as f64);
-                        } else {
-                            heights.push(part.height);
-                        }
-                        layout = l;
-                    } else {
-                        heights.push(part.height);
+    pub(crate) fn max_scroll_x(&self) -> f32 {
+        if self.line_wrapping() {
+            return 0.0;
+        }
+        let text_w =
+            f32::from(self.geo.bounds.size.width) - self.geo.gutter_width - self.theme().padding_left - SCROLLBAR_WIDTH;
+        (self.max_line_width + self.geo.char_width * 2.0 - text_w).max(0.0)
+    }
+
+    pub(crate) fn restart_blink(&mut self, cx: &mut Context<Self>) {
+        self.cursor_visible = true;
+        self.blink_epoch += 1;
+        let epoch = self.blink_epoch;
+        self._blink = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(BLINK_INTERVAL).await;
+            let alive = this
+                .update(cx, |view, cx| {
+                    if view.blink_epoch != epoch {
+                        return false;
                     }
-                }
-                result.push((block, layout));
-            }
-            clear_height_change_flag();
-            let map = std::mem::replace(&mut self.vs.height_map, crate::heightmap::HeightMap::empty());
-            let mut measured = MeasuredHeights::new(range.from, heights);
-            self.vs.height_map = map.update_height(&self.vs.oracle, 0, false, Some(&mut measured));
-            if !height_change_flag() {
+                    if view.focused {
+                        view.cursor_visible = !view.cursor_visible;
+                        cx.notify();
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
                 break;
             }
-            height_changed = true;
-            if attempt == 2 {
-                // Recompute the positions without laying out again.
-                let mut blocks = Vec::new();
-                let oracle = &self.vs.oracle;
-                self.vs.height_map.for_each_line(range.from, range.to, oracle, 0.0, 0, &mut |b| blocks.push(b));
-                for ((old, _), new) in result.iter_mut().zip(blocks) {
-                    *old = new;
-                }
-            }
-        }
-        let mut flags = 0;
-        if height_changed {
-            flags |= update_flag::HEIGHT;
-        }
-        if range != self.vs.viewport {
-            self.vs.viewport = range;
-            flags |= update_flag::VIEWPORT | update_flag::VIEWPORT_MOVED;
-        }
-        if flags != 0 {
-            self.notify(flags);
-        }
-        result
+        }));
     }
 
-    fn paint(
-        &mut self,
-        ui: &egui::Ui,
-        rect: Rect,
-        lines: &[(BlockInfo, Option<LineLayout>)],
-        focused: bool,
-        theme: &Theme,
-    ) {
-        let clip = ui.clip_rect();
-        let painter = ui.painter_at(clip);
-        painter.rect_filled(clip, 0.0, theme.background);
-        let origin = self.geo.origin;
-        let selection = self.state.selection().clone();
-        let active_lines = *self.state.facet(&HIGHLIGHT_ACTIVE_LINE);
-        let right = match self.geo.wrap_width {
-            Some(w) => w,
-            None => (clip.right() - origin.x).max(self.geo.max_line_width),
-        };
-        let sel_color = if focused { theme.selection } else { theme.selection_unfocused };
-        let now = self.now();
-        let blink_period = 1.2;
-        let phase = (now - self.blink_start).rem_euclid(blink_period);
-        let caret_on = phase < blink_period / 2.0;
-        if focused {
-            let wait = if caret_on { blink_period / 2.0 - phase } else { blink_period - phase };
-            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait.max(0.01)));
-        }
-        let decos = self.decoration_sets();
-        let mut ime_rect = None;
-
-        for (block, layout) in lines {
-            let y = origin.y + block.top as f32;
-            let height = block.height as f32;
-            let has_head = selection.ranges.iter().any(|r| r.head() >= block.from && r.head() <= block.to());
-            let deco = line_decorations(&decos, block.from, block.to());
-            let line_rect =
-                Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width().max(clip.width()), height));
-            if let Some(bg) = deco.background {
-                painter.rect_filled(line_rect, 0.0, bg);
+    pub(crate) fn set_focus_state(&mut self, focused: bool, cx: &mut Context<Self>) {
+        if focused != self.focused {
+            self.focused = focused;
+            if focused {
+                self.restart_blink(cx);
             }
-            if active_lines && has_head {
-                painter.rect_filled(line_rect, 0.0, theme.active_line);
-            }
-            let Some(layout) = layout else { continue };
-            let text_top = match block.children() {
-                Some(c) => c.iter().find(|p| p.block_type() == BlockType::Text).map_or(block.top, |p| p.top),
-                None => block.top,
-            };
-            let text_pos = Pos2::new(origin.x, origin.y + text_top as f32);
-            let line = self.state.doc().line_at(block.from);
-            for r in &selection.ranges {
-                if r.is_empty() || r.to < line.from || r.from > line.to {
-                    continue;
-                }
-                let a = r.from.max(line.from) - line.from;
-                let b = r.to.min(line.to) - line.from;
-                for rr in layout.range_rects(a, b, r.to > line.to, right) {
-                    painter.rect_filled(rr.translate(text_pos.to_vec2()), 0.0, sel_color);
-                }
-            }
-            painter.galley(text_pos, layout.galley.clone(), theme.text);
-
-            for (i, r) in selection.ranges.iter().enumerate() {
-                let head = r.head();
-                if head < line.from || head > line.to {
-                    continue;
-                }
-                let c = layout.coords(head - line.from, cursor_assoc(r)).translate(text_pos.to_vec2());
-                let caret = Rect::from_min_max(
-                    Pos2::new(c.left() - theme.caret_width / 2.0, c.top()),
-                    Pos2::new(c.left() + theme.caret_width / 2.0, c.bottom()),
-                );
-                if i == selection.main_index {
-                    ime_rect = Some(caret);
-                    if let Some(text) = self.input.composition.as_deref().filter(|t| !t.is_empty()) {
-                        let galley = ui.ctx().fonts_mut(|f| {
-                            let mut job = egui::text::LayoutJob::default();
-                            job.append(
-                                text,
-                                0.0,
-                                egui::TextFormat {
-                                    font_id: theme.font.clone(),
-                                    color: theme.text,
-                                    background: theme.background,
-                                    underline: egui::Stroke::new(1.0, theme.composition),
-                                    line_height: Some(theme.row_height()),
-                                    ..Default::default()
-                                },
-                            );
-                            f.layout_job(job)
-                        });
-                        painter.galley(Pos2::new(c.left(), c.top()), galley, theme.text);
-                        continue;
-                    }
-                }
-                if focused && caret_on {
-                    painter.rect_filled(caret, 0.0, theme.caret);
-                }
-            }
-        }
-
-        if self.geo.gutter_width > 0.0 {
-            let gutter =
-                Rect::from_min_max(clip.left_top(), Pos2::new(clip.left() + self.geo.gutter_width, clip.bottom()));
-            painter.rect_filled(gutter, 0.0, theme.gutter_background);
-            for (block, layout) in lines {
-                if layout.is_none() {
-                    continue;
-                }
-                let line = self.state.doc().line_at(block.from);
-                let active = selection.ranges.iter().any(|r| r.head() >= line.from && r.head() <= line.to);
-                painter.text(
-                    Pos2::new(
-                        gutter.right() - 7.0,
-                        origin.y + block.top as f32 + (self.geo.row_height - self.geo.text_height) / 2.0,
-                    ),
-                    egui::Align2::RIGHT_TOP,
-                    line.number.to_string(),
-                    theme.font.clone(),
-                    if active { theme.gutter_active_text } else { theme.gutter_text },
-                );
-            }
-        }
-
-        if focused {
-            if let Some(r) = ime_rect {
-                ui.ctx().output_mut(|o| {
-                    o.ime =
-                        Some(egui::output::IMEOutput { rect: r, cursor_rect: r, should_interrupt_composition: false });
-                });
-            }
+            self.notify_flags(update_flag::FOCUS, cx);
         }
     }
 
-    fn scroll_to_target(&mut self, ui: &egui::Ui) {
-        let Some(target) = self.vs.scroll_target.clone() else { return };
-        let Some(r) = self.coords_at_pos(target.range.head(), cursor_assoc(&target.range)) else { return };
-        let r = r.expand2(Vec2::new(target.x_margin + self.geo.char_width, target.y_margin));
-        let align = match target.y {
-            ScrollStrategy::Nearest => None,
-            ScrollStrategy::Start => Some(egui::Align::Min),
-            ScrollStrategy::End => Some(egui::Align::Max),
-            ScrollStrategy::Center => Some(egui::Align::Center),
-        };
-        ui.scroll_to_rect(r, align);
-        // Heights measured after scrolling can move the target; try again in
-        // the next frame.
-        self.scroll_frames += 1;
-        if self.scroll_frames >= 2 {
-            self.vs.scroll_target = None;
-            self.scroll_frames = 0;
-        } else {
-            ui.ctx().request_repaint();
-        }
+    pub(crate) fn utf16_to_byte(&self, off: usize) -> usize {
+        let rope = self.state.doc().rope();
+        rope.byte_of_utf16_code_unit(off.min(rope.utf16_len()))
+    }
+
+    pub(crate) fn byte_to_utf16(&self, off: usize) -> usize {
+        self.state.doc().rope().utf16_code_unit_of_byte(off.min(self.state.doc().len()))
     }
 }
 
-/// The association to use when drawing a range's head (CodeMirror's
-/// `range.assoc || 1`).
-pub(crate) fn cursor_assoc(r: &SelectionRange) -> i32 {
-    match r.assoc() {
-        0 => 1,
-        a => a,
+impl Focusable for EditorView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for EditorView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .track_focus(&self.focus_handle)
+            .key_context("CodeMirror")
+            .cursor(CursorStyle::IBeam)
+            .on_key_down(cx.listener(Self::on_key_down))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .child(EditorElement { view: cx.entity() })
     }
 }

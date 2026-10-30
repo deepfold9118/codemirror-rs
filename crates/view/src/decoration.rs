@@ -1,15 +1,15 @@
 //! Decorations. Port of `decoration.ts`.
 //!
 //! CodeMirror styles marks and lines with DOM attributes and CSS classes.
-//! Here a mark carries a [`MarkStyle`] that maps onto egui's text format,
-//! and a line decoration a background color. The `class` field is kept as
+//! Here a mark carries a [`MarkStyle`] that maps onto GPUI text runs, and a
+//! line decoration a background color. The `class` field is kept as
 //! an identifier that other code can match on.
 
 use std::any::Any;
 use std::sync::Arc;
 
 use codemirror_state::{MapMode, Range, RangeSet, RangeValue};
-use egui::{Color32, Stroke};
+use gpui::{FontStyle, FontWeight, Hsla, StrikethroughStyle, UnderlineStyle};
 
 /// Widgets added to the content are described by implementations of this
 /// trait. Drawing widgets is not ported yet; the height map already
@@ -83,15 +83,17 @@ pub enum BlockType {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MarkStyle {
     /// Text color.
-    pub color: Option<Color32>,
+    pub color: Option<Hsla>,
     /// Background color.
-    pub background: Option<Color32>,
-    /// Underline.
-    pub underline: Option<Stroke>,
+    pub background: Option<Hsla>,
+    /// Underline (set `wavy` for a spelling squiggle).
+    pub underline: Option<UnderlineStyle>,
     /// Strikethrough.
-    pub strikethrough: Option<Stroke>,
-    /// Italic text.
-    pub italics: bool,
+    pub strikethrough: Option<StrikethroughStyle>,
+    /// Font style (italic).
+    pub font_style: Option<FontStyle>,
+    /// Font weight (bold).
+    pub font_weight: Option<FontWeight>,
 }
 
 /// Options for [`Decoration::mark`].
@@ -150,7 +152,7 @@ pub struct LineSpec {
     /// An identifier for this kind of line decoration.
     pub class: Option<String>,
     /// Background color for the line.
-    pub background: Option<Color32>,
+    pub background: Option<Hsla>,
 }
 
 #[derive(Clone)]

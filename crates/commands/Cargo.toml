@@ -10,6 +10,7 @@ rust-version.workspace = true
 codemirror-state = { path = "../state" }
 codemirror-language = { path = "../language" }
 codemirror-view = { path = "../view" }
+gpui.workspace = true
 
 [dev-dependencies]
-eframe.workspace = true
+gpui = { workspace = true, features = ["test-support"] }

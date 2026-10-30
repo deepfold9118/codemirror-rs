@@ -11,73 +11,79 @@ use std::rc::Rc;
 
 use codemirror_state::{CharCategory, EditorSelection, EditorState, SelectionRange, Transaction, TransactionSpec};
 use codemirror_view::{EditorView, KeyBinding, ScrollStrategy, ScrollTarget, SCROLL_INTO_VIEW};
+use gpui::{Context, Window};
 
 use crate::commands::{delete_by, extend_sel, move_sel, range_end, selected_line_blocks, update_sel, Dispatch};
 use crate::*;
 
 // Run a state-level helper that reads the view, then dispatch what it
 // produced.
-fn with_view(view: &mut EditorView, f: impl FnOnce(&EditorView, &EditorState, Dispatch) -> bool) -> bool {
+fn with_view(
+    view: &mut EditorView,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
+    f: impl FnOnce(&EditorView, &mut Window, &EditorState, Dispatch) -> bool,
+) -> bool {
     let state = view.state().clone();
     let mut trs: Vec<Transaction> = Vec::new();
-    let result = f(view, &state, &mut |tr| trs.push(tr));
+    let result = f(view, window, &state, &mut |tr| trs.push(tr));
     for tr in trs {
-        view.dispatch(tr);
+        view.dispatch(tr, cx);
     }
     result
 }
 
-fn cursor_by_char(view: &mut EditorView, forward: bool) -> bool {
-    with_view(view, |v, s, d| {
+fn cursor_by_char(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>, forward: bool) -> bool {
+    with_view(view, window, cx, |v, _, s, d| {
         move_sel(s, d, |r| if r.is_empty() { v.move_by_char(r, forward, None) } else { range_end(r, forward) })
     })
 }
 
 /// Move the selection one character to the left.
-pub fn cursor_char_left(view: &mut EditorView) -> bool {
-    cursor_by_char(view, false)
+pub fn cursor_char_left(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_char(view, window, cx, false)
 }
 
 /// Move the selection one character to the right.
-pub fn cursor_char_right(view: &mut EditorView) -> bool {
-    cursor_by_char(view, true)
+pub fn cursor_char_right(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_char(view, window, cx, true)
 }
 
 /// Move the selection one character forward.
-pub fn cursor_char_forward(view: &mut EditorView) -> bool {
-    cursor_by_char(view, true)
+pub fn cursor_char_forward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_char(view, window, cx, true)
 }
 
 /// Move the selection one character backward.
-pub fn cursor_char_backward(view: &mut EditorView) -> bool {
-    cursor_by_char(view, false)
+pub fn cursor_char_backward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_char(view, window, cx, false)
 }
 
-fn cursor_by_group(view: &mut EditorView, forward: bool) -> bool {
-    with_view(view, |v, s, d| {
+fn cursor_by_group(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>, forward: bool) -> bool {
+    with_view(view, window, cx, |v, _, s, d| {
         move_sel(s, d, |r| if r.is_empty() { v.move_by_group(r, forward) } else { range_end(r, forward) })
     })
 }
 
 /// Move the selection to the left across one group of word or non-word
 /// (but also non-space) characters.
-pub fn cursor_group_left(view: &mut EditorView) -> bool {
-    cursor_by_group(view, false)
+pub fn cursor_group_left(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_group(view, window, cx, false)
 }
 
 /// Move the selection one group to the right.
-pub fn cursor_group_right(view: &mut EditorView) -> bool {
-    cursor_by_group(view, true)
+pub fn cursor_group_right(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_group(view, window, cx, true)
 }
 
 /// Move the selection one group forward.
-pub fn cursor_group_forward(view: &mut EditorView) -> bool {
-    cursor_by_group(view, true)
+pub fn cursor_group_forward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_group(view, window, cx, true)
 }
 
 /// Move the selection one group backward.
-pub fn cursor_group_backward(view: &mut EditorView) -> bool {
-    cursor_by_group(view, false)
+pub fn cursor_group_backward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_group(view, window, cx, false)
 }
 
 fn to_group_start(state: &EditorState, pos: usize, start: &str) -> Box<dyn FnMut(&str) -> bool> {
@@ -102,8 +108,8 @@ fn group_forward_win(v: &EditorView, r: &SelectionRange) -> SelectionRange {
 
 /// Move the cursor one group forward in the default Windows style, where
 /// it moves to the start of the next group.
-pub fn cursor_group_forward_win(view: &mut EditorView) -> bool {
-    with_view(view, |v, s, d| {
+pub fn cursor_group_forward_win(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    with_view(view, window, cx, |v, _, s, d| {
         move_sel(s, d, |r| if r.is_empty() { group_forward_win(v, r) } else { range_end(r, true) })
     })
 }
@@ -200,58 +206,58 @@ fn move_by_subword(view: &EditorView, range: &SelectionRange, forward: bool) -> 
     view.move_by_char(range, forward, Some(&by))
 }
 
-fn cursor_by_subword(view: &mut EditorView, forward: bool) -> bool {
-    with_view(view, |v, s, d| {
+fn cursor_by_subword(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>, forward: bool) -> bool {
+    with_view(view, window, cx, |v, _, s, d| {
         move_sel(s, d, |r| if r.is_empty() { move_by_subword(v, r, forward) } else { range_end(r, forward) })
     })
 }
 
 /// Move the selection one group or camel-case subword forward.
-pub fn cursor_subword_forward(view: &mut EditorView) -> bool {
-    cursor_by_subword(view, true)
+pub fn cursor_subword_forward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_subword(view, window, cx, true)
 }
 
 /// Move the selection one group or camel-case subword backward.
-pub fn cursor_subword_backward(view: &mut EditorView) -> bool {
-    cursor_by_subword(view, false)
+pub fn cursor_subword_backward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_subword(view, window, cx, false)
 }
 
-fn cursor_by_line(view: &mut EditorView, forward: bool) -> bool {
-    with_view(view, |v, s, d| {
+fn cursor_by_line(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>, forward: bool) -> bool {
+    with_view(view, window, cx, |v, window, s, d| {
         move_sel(s, d, |r| {
             if !r.is_empty() {
                 return range_end(r, forward);
             }
-            let moved = v.move_vertically(r, forward, None);
+            let moved = v.move_vertically(window, r, forward, None);
             if moved.head() != r.head() {
                 moved
             } else {
-                v.move_to_line_boundary(r, forward, true)
+                v.move_to_line_boundary(window, r, forward, true)
             }
         })
     })
 }
 
 /// Move the selection one line up.
-pub fn cursor_line_up(view: &mut EditorView) -> bool {
-    cursor_by_line(view, false)
+pub fn cursor_line_up(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_line(view, window, cx, false)
 }
 
 /// Move the selection one line down.
-pub fn cursor_line_down(view: &mut EditorView) -> bool {
-    cursor_by_line(view, true)
+pub fn cursor_line_down(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_line(view, window, cx, true)
 }
 
 fn page_height(view: &EditorView) -> f32 {
     view.default_line_height().max(view.visible_height() - 5.0)
 }
 
-fn cursor_by_page(view: &mut EditorView, forward: bool) -> bool {
+fn cursor_by_page(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>, forward: bool) -> bool {
     let height = page_height(view);
     let state = view.state().clone();
     let selection = update_sel(state.selection(), |r| {
         if r.is_empty() {
-            view.move_vertically(r, forward, Some(height))
+            view.move_vertically(window, r, forward, Some(height))
         } else {
             range_end(r, forward)
         }
@@ -262,36 +268,40 @@ fn cursor_by_page(view: &mut EditorView, forward: bool) -> bool {
     let mut spec = TransactionSpec::new().selection(selection.clone()).scroll_into_view().user_event("select");
     // Keep the cursor at the same height in the view.
     let visible = view.visible_rect();
-    if let Some(start) = view.coords_at_pos(state.selection().main().head(), 1) {
-        if start.top() > visible.top() && start.bottom() < visible.bottom() {
-            spec = spec.effect(SCROLL_INTO_VIEW.of(ScrollTarget {
-                range: EditorSelection::cursor(selection.main().head()),
-                y: ScrollStrategy::Start,
-                x: ScrollStrategy::Nearest,
-                y_margin: start.top() - visible.top(),
-                x_margin: 5.0,
-            }));
-        }
+    let start = view.coords_at_pos(window, state.selection().main().head(), 1);
+    if start.top() > visible.top() && start.bottom() < visible.bottom() {
+        spec = spec.effect(SCROLL_INTO_VIEW.of(ScrollTarget {
+            range: EditorSelection::cursor(selection.main().head()),
+            y: ScrollStrategy::Start,
+            x: ScrollStrategy::Nearest,
+            y_margin: f32::from(start.top() - visible.top()),
+            x_margin: 5.0,
+        }));
     }
-    view.dispatch_spec(spec);
+    view.dispatch_spec(spec, cx);
     true
 }
 
 /// Move the selection one page up.
-pub fn cursor_page_up(view: &mut EditorView) -> bool {
-    cursor_by_page(view, false)
+pub fn cursor_page_up(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_page(view, window, cx, false)
 }
 
 /// Move the selection one page down.
-pub fn cursor_page_down(view: &mut EditorView) -> bool {
-    cursor_by_page(view, true)
+pub fn cursor_page_down(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_by_page(view, window, cx, true)
 }
 
-fn move_by_line_boundary(view: &EditorView, start: &SelectionRange, forward: bool) -> SelectionRange {
+fn move_by_line_boundary(
+    view: &EditorView,
+    window: &mut Window,
+    start: &SelectionRange,
+    forward: bool,
+) -> SelectionRange {
     let line = view.line_block_at(start.head());
-    let mut moved = view.move_to_line_boundary(start, forward, true);
+    let mut moved = view.move_to_line_boundary(window, start, forward, true);
     if moved.head() == start.head() && moved.head() != if forward { line.to() } else { line.from } {
-        moved = view.move_to_line_boundary(start, forward, false);
+        moved = view.move_to_line_boundary(window, start, forward, false);
     }
     if !forward && moved.head() == line.from && line.length > 0 {
         let text = view.state().slice_doc(line.from, line.to().min(line.from + 100));
@@ -305,156 +315,163 @@ fn move_by_line_boundary(view: &EditorView, start: &SelectionRange, forward: boo
 
 /// Move the selection to the next line wrap point, or to the end of the
 /// line if there isn't one left on this line.
-pub fn cursor_line_boundary_forward(view: &mut EditorView) -> bool {
-    with_view(view, |v, s, d| move_sel(s, d, |r| move_by_line_boundary(v, r, true)))
+pub fn cursor_line_boundary_forward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    with_view(view, window, cx, |v, window, s, d| move_sel(s, d, |r| move_by_line_boundary(v, window, r, true)))
 }
 
 /// Move the selection to previous line wrap point, or failing that to the
 /// start of the line. If the line is indented, and the cursor isn't already
 /// at the end of the indentation, this will move to the end of the
 /// indentation instead of the start of the line.
-pub fn cursor_line_boundary_backward(view: &mut EditorView) -> bool {
-    with_view(view, |v, s, d| move_sel(s, d, |r| move_by_line_boundary(v, r, false)))
+pub fn cursor_line_boundary_backward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    with_view(view, window, cx, |v, window, s, d| move_sel(s, d, |r| move_by_line_boundary(v, window, r, false)))
 }
 
 /// Move the selection one line wrap point to the left.
-pub fn cursor_line_boundary_left(view: &mut EditorView) -> bool {
-    cursor_line_boundary_backward(view)
+pub fn cursor_line_boundary_left(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_line_boundary_backward(view, window, cx)
 }
 
 /// Move the selection one line wrap point to the right.
-pub fn cursor_line_boundary_right(view: &mut EditorView) -> bool {
-    cursor_line_boundary_forward(view)
+pub fn cursor_line_boundary_right(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    cursor_line_boundary_forward(view, window, cx)
 }
 
 /// Move the selection to the start of the line.
-pub fn cursor_line_start(view: &mut EditorView) -> bool {
-    with_view(view, |v, s, d| move_sel(s, d, |r| v.move_to_line_boundary(r, false, false)))
+pub fn cursor_line_start(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    with_view(view, window, cx, |v, window, s, d| move_sel(s, d, |r| v.move_to_line_boundary(window, r, false, false)))
 }
 
 /// Move the selection to the end of the line.
-pub fn cursor_line_end(view: &mut EditorView) -> bool {
-    with_view(view, |v, s, d| move_sel(s, d, |r| v.move_to_line_boundary(r, true, false)))
+pub fn cursor_line_end(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    with_view(view, window, cx, |v, window, s, d| move_sel(s, d, |r| v.move_to_line_boundary(window, r, true, false)))
 }
 
 fn select_by(
     view: &mut EditorView,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
     forward: bool,
-    how: impl Fn(&EditorView, &SelectionRange) -> SelectionRange,
+    how: impl Fn(&EditorView, &mut Window, &SelectionRange) -> SelectionRange,
 ) -> bool {
-    with_view(view, |v, s, d| extend_sel(s, d, forward, |r| how(v, r)))
+    with_view(view, window, cx, |v, window, s, d| extend_sel(s, d, forward, |r| how(v, window, r)))
 }
 
 /// Move the selection head one character to the left, while leaving the
 /// anchor in place.
-pub fn select_char_left(view: &mut EditorView) -> bool {
-    select_by(view, false, |v, r| v.move_by_char(r, false, None))
+pub fn select_char_left(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, false, |v, _, r| v.move_by_char(r, false, None))
 }
 
 /// Move the selection head one character to the right.
-pub fn select_char_right(view: &mut EditorView) -> bool {
-    select_by(view, true, |v, r| v.move_by_char(r, true, None))
+pub fn select_char_right(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, true, |v, _, r| v.move_by_char(r, true, None))
 }
 
 /// Move the selection head one character forward.
-pub fn select_char_forward(view: &mut EditorView) -> bool {
-    select_char_right(view)
+pub fn select_char_forward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_char_right(view, window, cx)
 }
 
 /// Move the selection head one character backward.
-pub fn select_char_backward(view: &mut EditorView) -> bool {
-    select_char_left(view)
+pub fn select_char_backward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_char_left(view, window, cx)
 }
 
 /// Move the selection head one group to the left.
-pub fn select_group_left(view: &mut EditorView) -> bool {
-    select_by(view, false, |v, r| v.move_by_group(r, false))
+pub fn select_group_left(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, false, |v, _, r| v.move_by_group(r, false))
 }
 
 /// Move the selection head one group to the right.
-pub fn select_group_right(view: &mut EditorView) -> bool {
-    select_by(view, true, |v, r| v.move_by_group(r, true))
+pub fn select_group_right(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, true, |v, _, r| v.move_by_group(r, true))
 }
 
 /// Move the selection head one group forward.
-pub fn select_group_forward(view: &mut EditorView) -> bool {
-    select_group_right(view)
+pub fn select_group_forward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_group_right(view, window, cx)
 }
 
 /// Move the selection head one group backward.
-pub fn select_group_backward(view: &mut EditorView) -> bool {
-    select_group_left(view)
+pub fn select_group_backward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_group_left(view, window, cx)
 }
 
 /// Move the selection head one group forward in the default Windows style,
 /// skipping to the start of the next group.
-pub fn select_group_forward_win(view: &mut EditorView) -> bool {
-    select_by(view, true, group_forward_win)
+pub fn select_group_forward_win(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, true, |v, _, r| group_forward_win(v, r))
 }
 
 /// Move the selection head one group or camel-case subword forward.
-pub fn select_subword_forward(view: &mut EditorView) -> bool {
-    select_by(view, true, |v, r| move_by_subword(v, r, true))
+pub fn select_subword_forward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, true, |v, _, r| move_by_subword(v, r, true))
 }
 
 /// Move the selection head one group or subword backward.
-pub fn select_subword_backward(view: &mut EditorView) -> bool {
-    select_by(view, false, |v, r| move_by_subword(v, r, false))
+pub fn select_subword_backward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, false, |v, _, r| move_by_subword(v, r, false))
 }
 
 /// Move the selection head one line up.
-pub fn select_line_up(view: &mut EditorView) -> bool {
-    select_by(view, false, |v, r| v.move_vertically(r, false, None))
+pub fn select_line_up(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, false, |v, window, r| v.move_vertically(window, r, false, None))
 }
 
 /// Move the selection head one line down.
-pub fn select_line_down(view: &mut EditorView) -> bool {
-    select_by(view, true, |v, r| v.move_vertically(r, true, None))
+pub fn select_line_down(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, true, |v, window, r| v.move_vertically(window, r, true, None))
 }
 
 /// Move the selection head one page up.
-pub fn select_page_up(view: &mut EditorView) -> bool {
+pub fn select_page_up(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
     let h = page_height(view);
-    select_by(view, false, move |v, r| v.move_vertically(r, false, Some(h)))
+    select_by(view, window, cx, false, move |v, window, r| v.move_vertically(window, r, false, Some(h)))
 }
 
 /// Move the selection head one page down.
-pub fn select_page_down(view: &mut EditorView) -> bool {
+pub fn select_page_down(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
     let h = page_height(view);
-    select_by(view, true, move |v, r| v.move_vertically(r, true, Some(h)))
+    select_by(view, window, cx, true, move |v, window, r| v.move_vertically(window, r, true, Some(h)))
 }
 
 /// Move the selection head to the next line boundary.
-pub fn select_line_boundary_forward(view: &mut EditorView) -> bool {
-    select_by(view, true, |v, r| move_by_line_boundary(v, r, true))
+pub fn select_line_boundary_forward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, true, |v, window, r| move_by_line_boundary(v, window, r, true))
 }
 
 /// Move the selection head to the previous line boundary.
-pub fn select_line_boundary_backward(view: &mut EditorView) -> bool {
-    select_by(view, false, |v, r| move_by_line_boundary(v, r, false))
+pub fn select_line_boundary_backward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, false, |v, window, r| move_by_line_boundary(v, window, r, false))
 }
 
 /// Move the selection head one line boundary to the left.
-pub fn select_line_boundary_left(view: &mut EditorView) -> bool {
-    select_line_boundary_backward(view)
+pub fn select_line_boundary_left(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_line_boundary_backward(view, window, cx)
 }
 
 /// Move the selection head one line boundary to the right.
-pub fn select_line_boundary_right(view: &mut EditorView) -> bool {
-    select_line_boundary_forward(view)
+pub fn select_line_boundary_right(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_line_boundary_forward(view, window, cx)
 }
 
 /// Move the selection head to the start of the line.
-pub fn select_line_start(view: &mut EditorView) -> bool {
-    select_by(view, false, |v, r| EditorSelection::cursor(v.line_block_at(r.head()).from))
+pub fn select_line_start(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, false, |v, _, r| EditorSelection::cursor(v.line_block_at(r.head()).from))
 }
 
 /// Move the selection head to the end of the line.
-pub fn select_line_end(view: &mut EditorView) -> bool {
-    select_by(view, true, |v, r| EditorSelection::cursor(v.line_block_at(r.head()).to()))
+pub fn select_line_end(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    select_by(view, window, cx, true, |v, _, r| EditorSelection::cursor(v.line_block_at(r.head()).to()))
 }
 
-fn add_cursor_vertically(view: &mut EditorView, forward: bool) -> bool {
+fn add_cursor_vertically(
+    view: &mut EditorView,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
+    forward: bool,
+) -> bool {
     let state = view.state().clone();
     let sel = state.selection();
     let mut ranges = sel.ranges.clone();
@@ -463,7 +480,7 @@ fn add_cursor_vertically(view: &mut EditorView, forward: bool) -> bool {
         if if forward { line.to < state.doc().len() } else { line.from > 0 } {
             let mut cur = *range;
             loop {
-                let next = view.move_vertically(&cur, forward, None);
+                let next = view.move_vertically(window, &cur, forward, None);
                 if next.head() < line.from || next.head() > line.to {
                     if !ranges.iter().any(|r| r.head() == next.head()) {
                         ranges.push(next);
@@ -482,24 +499,24 @@ fn add_cursor_vertically(view: &mut EditorView, forward: bool) -> bool {
     }
     let main = ranges.len() - 1;
     let tr = crate::commands::set_sel(&state, EditorSelection::create(ranges, main));
-    view.dispatch(tr);
+    view.dispatch(tr, cx);
     true
 }
 
 /// Expand the selection by adding a cursor above the heads of currently
 /// selected ranges.
-pub fn add_cursor_above(view: &mut EditorView) -> bool {
-    add_cursor_vertically(view, false)
+pub fn add_cursor_above(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    add_cursor_vertically(view, window, cx, false)
 }
 
 /// Expand the selection by adding a cursor below the heads of currently
 /// selected ranges.
-pub fn add_cursor_below(view: &mut EditorView) -> bool {
-    add_cursor_vertically(view, true)
+pub fn add_cursor_below(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    add_cursor_vertically(view, window, cx, true)
 }
 
 /// Delete selected lines.
-pub fn delete_line(view: &mut EditorView) -> bool {
+pub fn delete_line(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
     let state = view.state().clone();
     if state.read_only() {
         return false;
@@ -523,28 +540,33 @@ pub fn delete_line(view: &mut EditorView) -> bool {
         if view.line_wrapping() {
             let block = view.line_block_at(range.head());
             let assoc = if range.assoc() != 0 { range.assoc() } else { 1 };
-            if let Some(pos) = view.doc_coords_at_pos(range.head(), assoc) {
-                dist = Some((block.bottom() as f32 - pos.bottom()) + view.default_line_height() / 2.0);
-            }
+            let (_, _, bottom) = view.doc_coords_at_pos(window, range.head(), assoc);
+            dist = Some((block.bottom() as f32 - bottom) + view.default_line_height() / 2.0);
         }
-        view.move_vertically(range, true, dist)
+        view.move_vertically(window, range, true, dist)
     })
     .map(changes.desc(), -1);
     view.dispatch_spec(
         TransactionSpec::new().changes(changes).selection(selection).scroll_into_view().user_event("delete.line"),
+        cx,
     );
     true
 }
 
-fn delete_by_view(view: &mut EditorView, by: impl Fn(&EditorView, &SelectionRange) -> usize) -> bool {
-    with_view(view, |v, s, d| delete_by(s, d, |r| by(v, r)))
+fn delete_by_view(
+    view: &mut EditorView,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
+    by: impl Fn(&EditorView, &mut Window, &SelectionRange) -> usize,
+) -> bool {
+    with_view(view, window, cx, |v, window, s, d| delete_by(s, d, |r| by(v, window, r)))
 }
 
 /// Delete the selection, or, if it is a cursor selection, delete to the end
 /// of the line. If the cursor is directly at the end of the line, delete
 /// the line break after it.
-pub fn delete_to_line_end(view: &mut EditorView) -> bool {
-    delete_by_view(view, |v, r| {
+pub fn delete_to_line_end(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    delete_by_view(view, window, cx, |v, _, r| {
         let line_end = v.line_block_at(r.head()).to();
         if r.head() < line_end {
             line_end
@@ -557,8 +579,8 @@ pub fn delete_to_line_end(view: &mut EditorView) -> bool {
 /// Delete the selection, or, if it is a cursor selection, delete to the
 /// start of the line. If the cursor is directly at the start of the line,
 /// delete the line break before it.
-pub fn delete_to_line_start(view: &mut EditorView) -> bool {
-    delete_by_view(view, |v, r| {
+pub fn delete_to_line_start(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    delete_by_view(view, window, cx, |v, _, r| {
         let line_start = v.line_block_at(r.head()).from;
         if r.head() > line_start {
             line_start
@@ -570,9 +592,9 @@ pub fn delete_to_line_start(view: &mut EditorView) -> bool {
 
 /// Delete the selection, or, if it is a cursor selection, delete to the
 /// start of the line or the next line wrap before the cursor.
-pub fn delete_line_boundary_backward(view: &mut EditorView) -> bool {
-    delete_by_view(view, |v, r| {
-        let line_start = v.move_to_line_boundary(r, false, true).head();
+pub fn delete_line_boundary_backward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    delete_by_view(view, window, cx, |v, window, r| {
+        let line_start = v.move_to_line_boundary(window, r, false, true).head();
         if r.head() > line_start {
             line_start
         } else {
@@ -583,9 +605,9 @@ pub fn delete_line_boundary_backward(view: &mut EditorView) -> bool {
 
 /// Delete the selection, or, if it is a cursor selection, delete to the end
 /// of the line or the next line wrap after the cursor.
-pub fn delete_line_boundary_forward(view: &mut EditorView) -> bool {
-    delete_by_view(view, |v, r| {
-        let line_end = v.move_to_line_boundary(r, true, true).head();
+pub fn delete_line_boundary_forward(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    delete_by_view(view, window, cx, |v, window, r| {
+        let line_end = v.move_to_line_boundary(window, r, true, true).head();
         if r.head() < line_end {
             line_end
         } else {
@@ -596,8 +618,8 @@ pub fn delete_line_boundary_forward(view: &mut EditorView) -> bool {
 
 /// Variant of [`delete_group_forward`] that uses the Windows convention of
 /// also deleting the whitespace after a word.
-pub fn delete_group_forward_win(view: &mut EditorView) -> bool {
-    delete_by_view(view, |v, r| group_forward_win(v, r).head())
+pub fn delete_group_forward_win(view: &mut EditorView, window: &mut Window, cx: &mut Context<EditorView>) -> bool {
+    delete_by_view(view, window, cx, |v, _, r| group_forward_win(v, r).head())
 }
 
 /// Key bindings for the undo history.

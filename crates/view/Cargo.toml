@@ -1,11 +1,11 @@
 [package]
 name = "codemirror-view"
 version = "0.1.0"
-description = "A Rust port of @codemirror/view, drawn with egui"
+description = "A Rust port of @codemirror/view, drawn with GPUI"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
 codemirror-state = { path = "../state" }
-egui.workspace = true
+gpui.workspace = true
