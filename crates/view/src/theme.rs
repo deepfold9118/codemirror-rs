@@ -2,13 +2,16 @@
 //! here a [`Theme`] value, provided through the [`THEME`](crate::THEME)
 //! facet, holds the font and colors.
 
-use gpui::{font, rgb, rgba, Font, Hsla, SharedString};
+use gpui::{font, rgb, rgba, Font, FontFeatures, Hsla, SharedString};
 
 /// Fonts, colors and spacing for an editor view.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
     /// The editor font family.
     pub font_family: SharedString,
+    /// OpenType features of the editor font (CSS `font-feature-settings`),
+    /// such as [`FontFeatures::disable_ligatures`].
+    pub font_features: FontFeatures,
     /// Font size in pixels.
     pub font_size: f32,
     /// Line height as a multiple of the font size (CSS `line-height`).
@@ -47,6 +50,7 @@ impl Theme {
     pub fn dark() -> Theme {
         Theme {
             font_family: "Consolas".into(),
+            font_features: FontFeatures::default(),
             font_size: 14.0,
             line_height: 1.4,
             text: rgb(0xd4d4d4).into(),
@@ -84,7 +88,7 @@ impl Theme {
 
     /// The editor font.
     pub fn font(&self) -> Font {
-        font(self.font_family.clone())
+        Font { features: self.font_features.clone(), ..font(self.font_family.clone()) }
     }
 
     /// The height of a line of text.
