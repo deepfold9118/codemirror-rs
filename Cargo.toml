@@ -5,7 +5,7 @@ members = ["crates/state", "crates/language", "crates/view", "crates/commands", 
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = ""
+repository = "https://github.com/deepfold9118/codemirror-rs"
 rust-version = "1.86"
 
 [workspace.dependencies]
