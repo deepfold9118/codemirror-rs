@@ -238,7 +238,7 @@ impl EditorView {
         let pad = theme.padding_y as f64;
         let anchor = self.line_block_at_height((self.scroll.1 as f64 - pad).max(0.0));
         let anchor_offset = self.scroll.1 as f64 - anchor.top;
-        let decos = self.decoration_sets();
+        let mut decos = self.decoration_sets();
         let mut height_changed = false;
         let (mut lines, mut range) = (Vec::new(), Viewport::default());
         for _ in 0..3 {
@@ -320,6 +320,13 @@ impl EditorView {
         }
         if flags != 0 {
             self.notify_flags(flags, cx);
+            // View plugins recompute their decorations for the new viewport
+            // (a redraw requested from here would be dropped): lay the lines
+            // out again with them, in this frame.
+            if flags & update_flag::VIEWPORT != 0 && !self.plugins.is_empty() {
+                decos = self.decoration_sets();
+                lines = self.measure(window, &decos).0;
+            }
         }
 
         // Collect what to paint.

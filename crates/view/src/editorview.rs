@@ -68,7 +68,7 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// and render it as a child element.
 pub struct EditorView {
     state: EditorState,
-    plugins: Vec<PluginInstance>,
+    pub(crate) plugins: Vec<PluginInstance>,
     pub(crate) vs: ViewState,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) geo: Geometry,
