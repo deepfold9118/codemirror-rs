@@ -120,11 +120,15 @@ impl Element for EditorElement {
                 window.paint_quad(q);
             }
         });
+        // The lines laid out past the top and bottom edges have numbers
+        // too, which must not be drawn over what is around the editor.
         if let Some(g) = frame.gutter.take() {
-            window.paint_quad(g);
-            for (origin, line) in &frame.numbers {
-                let _ = line.paint(*origin, line_height, window, cx);
-            }
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                window.paint_quad(g);
+                for (origin, line) in &frame.numbers {
+                    let _ = line.paint(*origin, line_height, window, cx);
+                }
+            });
         }
         if let Some(s) = frame.scrollbar.take() {
             window.paint_quad(s);
