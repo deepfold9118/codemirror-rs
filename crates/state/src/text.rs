@@ -108,13 +108,19 @@ impl Text {
         Line { from, to, number: index + 1, text: self.rope.byte_slice(from..to).to_string() }
     }
 
-    /// Get the description for the line at the given position.
+    /// Get the description for the line at the given position. A position
+    /// inside a character, such as an estimate from the height map, gives
+    /// the line of that character.
     ///
     /// # Panics
     ///
     /// Panics when `pos` is outside the document.
     pub fn line_at(&self, pos: usize) -> Line {
         assert!(pos <= self.len(), "Invalid position {pos} in document of length {}", self.len());
+        let mut pos = pos;
+        while !self.rope.is_char_boundary(pos) {
+            pos -= 1;
+        }
         self.make_line(self.rope.line_of_byte(pos))
     }
 

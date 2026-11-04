@@ -262,3 +262,11 @@ fn counts_lines_like_codemirror() {
     assert_eq!(Text::from("a\r\nb\rc").to_lines(), vec!["a", "b", "c"]);
     assert_eq!(Text::from("a\nb").slice_string(0, 3, "\r\n"), "a\r\nb");
 }
+
+#[test]
+fn line_at_accepts_a_position_inside_a_character() {
+    // "─" is three bytes; byte 5 is inside the first one on line 2.
+    let doc = Text::of(&["abc", "──x"]);
+    let line = doc.line_at(5);
+    assert_eq!((line.number, line.from, line.to), (2, 4, 11));
+}
